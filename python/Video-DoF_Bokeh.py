@@ -2,23 +2,31 @@ import sys
 import os
 import cv2
 import numpy as np
-
-from PySide6.QtCore import Qt, QPointF
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPolygonF
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QSlider, QCheckBox, 
                                QComboBox, QPushButton, QFileDialog, QMessageBox)
 
-
-class ProDepthBlurQtApp(QMainWindow):
+class ProDepthBlurVideoApp(QMainWindow):
     def __init__(self, init_color_path=None, init_depth_path=None):
         super().__init__()
-        self.setWindowTitle("Pro Depth Map Focus Tool - PyQt6 Engine")
-        self.setGeometry(100, 100, 1400, 950)
+        self.setWindowTitle("Pro Depth Map Video Sync & Focus Engine - PySide6")
+        self.setGeometry(100, 100, 1400, 1000)
 
-        # Core Asset Trackers
-        self.img_color = None
-        self.img_depth = None
+        # Core Video Capture Trackers
+        self.color_path = None
+        self.depth_path = None
+        self.cap_color = None
+        self.cap_depth = None
+        self.total_frames = 0
+        self.current_frame_idx = 0
+        self.depth_frame_offset = 0  
+
+        # Playback Loops
+        self.is_playing = False
+        self.play_timer = QTimer()
+        self.play_timer.timeout.connect(self.advance_loop_frame)
         
         # Navigation Coordinate Space (Pan & Zoom state)
         self.zoom_level = 1.0
@@ -34,9 +42,8 @@ class ProDepthBlurQtApp(QMainWindow):
 
         self.setup_ui()
 
-        # Handle command-line arguments passed on startup
         if init_color_path and init_depth_path:
-            self.load_initial_files(init_color_path, init_depth_path)
+            self.load_initial_videos(init_color_path, init_depth_path)
 
     def setup_ui(self):
         main_widget = QWidget()
@@ -45,24 +52,20 @@ class ProDepthBlurQtApp(QMainWindow):
 
         # --- Drag and Drop Panels ---
         drop_layout = QHBoxLayout()
-        
-        self.lbl_color = QLabel("Drag & Drop COLOR PNG Here")
+        self.lbl_color = QLabel("Drag & Drop COLOR Video Here")
         self.lbl_color.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_color.setStyleSheet("background-color: #2b2b2b; color: #aaaaaa; border: 2px dashed #555555; font-size: 14px;")
-        self.lbl_color.setFixedHeight(70)
+        self.lbl_color.setFixedHeight(60)
         
-        self.lbl_depth = QLabel("Drag & Drop DEPTH PNG Here")
+        self.lbl_depth = QLabel("Drag & Drop DEPTH Video Here")
         self.lbl_depth.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_depth.setStyleSheet("background-color: #2b2b2b; color: #aaaaaa; border: 2px dashed #555555; font-size: 14px;")
-        self.lbl_depth.setFixedHeight(70)
+        self.lbl_depth.setFixedHeight(60)
 
-        # Enable native OS Drag and Drop
         self.lbl_color.setAcceptDrops(True)
         self.lbl_depth.setAcceptDrops(True)
-        
         self.lbl_color.dragEnterEvent = lambda e: e.acceptProposedAction() if e.mimeData().hasUrls() else e.ignore()
         self.lbl_depth.dragEnterEvent = lambda e: e.acceptProposedAction() if e.mimeData().hasUrls() else e.ignore()
-        
         self.lbl_color.dropEvent = lambda e: self.handle_drop(e, "color")
         self.lbl_depth.dropEvent = lambda e: self.handle_drop(e, "depth")
 
@@ -70,20 +73,42 @@ class ProDepthBlurQtApp(QMainWindow):
         drop_layout.addWidget(self.lbl_depth)
         main_layout.addLayout(drop_layout)
 
-        # --- Interactive Control Canvas Viewport ---
+        # --- Interactive Canvas Viewport ---
         self.canvas = QLabel()
         self.canvas.setStyleSheet("background-color: #111111;")
         self.canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.canvas, stretch=1)
 
-        # Connect mouse events to the canvas for Pan and Zoom
         self.canvas.mousePressEvent = self.start_pan
         self.canvas.mouseMoveEvent = self.execute_pan
         self.canvas.wheelEvent = self.execute_zoom
 
-        # --- Mode Control Toggles Bar ---
+        # --- NEW: Timeline Scrubbing & Control Panel ---
+        timeline_layout = QHBoxLayout()
+        self.btn_play = QPushButton("▶ Play Loop")
+        self.btn_play.setEnabled(False)
+        self.btn_play.setFixedWidth(100)
+        self.btn_play.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold;")
+        self.btn_play.clicked.connect(self.toggle_playback)
+
+        # The Timeline Scrub Slider
+        self.slider_timeline = QSlider(Qt.Orientation.Horizontal)
+        self.slider_timeline.setRange(0, 0)
+        self.slider_timeline.setEnabled(False)
+        self.slider_timeline.sliderMoved.connect(self.on_timeline_scrub) # Triggers on click-drag scrubbing
+        self.slider_timeline.sliderPressed.connect(self.on_scrub_start)
+        self.slider_timeline.sliderReleased.connect(self.on_scrub_stop)
+
+        self.lbl_time_status = QLabel("Frame: 0 / 0")
+        self.lbl_time_status.setFixedWidth(130)
+
+        timeline_layout.addWidget(self.btn_play)
+        timeline_layout.addWidget(self.slider_timeline, stretch=1)
+        timeline_layout.addWidget(self.lbl_time_status)
+        main_layout.addLayout(timeline_layout)
+
+        # --- Sync and Modes Options Bar ---
         toggle_layout = QHBoxLayout()
-        
         self.chk_split = QCheckBox("Split View Mode")
         self.chk_split.setChecked(True)
         self.chk_split.stateChanged.connect(self.update_preview)
@@ -91,7 +116,7 @@ class ProDepthBlurQtApp(QMainWindow):
         self.chk_invert = QCheckBox("Invert Depth Mask")
         self.chk_invert.stateChanged.connect(self.update_preview)
         
-        self.chk_grey = QCheckBox("View Isolated Focus Mask Only")
+        self.chk_grey = QCheckBox("View Focus Mask Only")
         self.chk_grey.stateChanged.connect(self.update_preview)
 
         self.shape_menu = QComboBox()
@@ -102,30 +127,49 @@ class ProDepthBlurQtApp(QMainWindow):
         ])
         self.shape_menu.currentTextChanged.connect(self.on_shape_change)
 
+        # Timeline Frame Offset Buttons
+        sync_box = QHBoxLayout()
+        self.btn_sync_minus = QPushButton("-1 Fr")
+        self.btn_sync_minus.setFixedWidth(45)
+        self.btn_sync_minus.setEnabled(False)
+        self.btn_sync_minus.clicked.connect(lambda: self.adjust_sync(-1))
+        
+        self.lbl_sync_val = QLabel("Sync: +0")
+        self.lbl_sync_val.setFixedWidth(65)
+        self.lbl_sync_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.btn_sync_plus = QPushButton("+1 Fr")
+        self.btn_sync_plus.setFixedWidth(45)
+        self.btn_sync_plus.setEnabled(False)
+        self.btn_sync_plus.clicked.connect(lambda: self.adjust_sync(1))
+        
+        sync_box.addWidget(self.btn_sync_minus)
+        sync_box.addWidget(self.lbl_sync_val)
+        sync_box.addWidget(self.btn_sync_plus)
+
         toggle_layout.addWidget(self.chk_split)
         toggle_layout.addWidget(self.chk_invert)
         toggle_layout.addWidget(self.chk_grey)
         toggle_layout.addWidget(QLabel("Bokeh Shape:"))
         toggle_layout.addWidget(self.shape_menu)
+        toggle_layout.addWidget(QLabel("      Timeline Sync:"))
+        toggle_layout.addLayout(sync_box)
         toggle_layout.addStretch()
-        toggle_layout.addWidget(QLabel("Info: Right-Click Drag = PAN | Scroll Wheel = ZOOM"))
         main_layout.addLayout(toggle_layout)
 
         # --- Optical Settings Sliders ---
         sliders_layout = QVBoxLayout()
         
-        # 1. Blur Kernel Size
         blur_box = QHBoxLayout()
         blur_box.addWidget(QLabel("Max Bokeh Diameter:"), stretch=1)
         self.slider_blur = QSlider(Qt.Orientation.Horizontal)
-        self.slider_blur.setRange(3, 151)
+        self.slider_blur.setRange(3, 101)
         self.slider_blur.setSingleStep(2)
         self.slider_blur.setValue(self.max_blur_kernel)
         self.slider_blur.valueChanged.connect(self.on_blur_change)
         blur_box.addWidget(self.slider_blur, stretch=5)
         sliders_layout.addLayout(blur_box)
 
-        # 2. Focal Plane Locator
         focal_box = QHBoxLayout()
         focal_box.addWidget(QLabel("Focal Distance (0-255):"), stretch=1)
         self.slider_focal = QSlider(Qt.Orientation.Horizontal)
@@ -135,7 +179,6 @@ class ProDepthBlurQtApp(QMainWindow):
         focal_box.addWidget(self.slider_focal, stretch=5)
         sliders_layout.addLayout(focal_box)
 
-        # 3. Depth of Field Margin
         dof_box = QHBoxLayout()
         dof_box.addWidget(QLabel("Focus Thickness (DoF):"), stretch=1)
         self.slider_dof = QSlider(Qt.Orientation.Horizontal)
@@ -147,62 +190,115 @@ class ProDepthBlurQtApp(QMainWindow):
 
         main_layout.addLayout(sliders_layout)
 
-        # --- Master Export Execution Panel Button ---
-        self.btn_export = QPushButton("Export Full Resolution Composite Image")
+        # --- Export Button ---
+        self.btn_export = QPushButton("Export Full Composite Video Sequence")
         self.btn_export.setEnabled(False)
         self.btn_export.setStyleSheet("background-color: green; color: white; font-weight: bold; font-size: 14px; padding: 10px;")
-        self.btn_export.clicked.connect(self.export_image)
+        self.btn_export.clicked.connect(self.export_video)
         main_layout.addWidget(self.btn_export)
 
-    # --- CLI Loading Logic ---
-    def load_initial_files(self, color_path, depth_path):
-        if os.path.exists(color_path) and os.path.exists(depth_path):
-            self.img_color = cv2.imread(color_path)
-            self.img_depth = cv2.imread(depth_path)
-            
-            if self.img_color is not None and self.img_depth is not None:
-                self.lbl_color.setText(f"Color Loaded:\n{os.path.basename(color_path)}")
-                self.lbl_color.setStyleSheet("background-color: #1e3d1e; color: white; border: 2px solid green;")
-                self.lbl_depth.setText(f"Depth Loaded:\n{os.path.basename(depth_path)}")
-                self.lbl_depth.setStyleSheet("background-color: #1e3d1e; color: white; border: 2px solid green;")
-                
-                self.btn_export.setEnabled(True)
-                self.zoom_level = 1.0
-                self.pan_x, self.pan_y = 0.0, 0.0
-                # Wait briefly for application to build its initial UI boundaries before displaying 
-                self.update_preview()
-            else:
-                QMessageBox.warning(self, "Load Error", "One of the provided files could not be read as an image.")
-        else:
-            QMessageBox.warning(self, "File Error", "One or both of the command line paths do not exist.")
-
-    # --- PyQt Native Drag and Drop Parsing ---
+    # --- Loading & Drag/Drop Mechanics ---
     def handle_drop(self, event, target):
         urls = event.mimeData().urls()
         if urls:
             file_path = urls[0].toLocalFile()
             if target == "color":
-                self.img_color = cv2.imread(file_path)
-                self.lbl_color.setText(f"Color Loaded:\n{os.path.basename(file_path)}")
+                self.color_path = file_path
+                self.lbl_color.setText(f"Color Video Loaded:\n{os.path.basename(file_path)}")
                 self.lbl_color.setStyleSheet("background-color: #1e3d1e; color: white; border: 2px solid green;")
             else:
-                self.img_depth = cv2.imread(file_path)
-                self.lbl_depth.setText(f"Depth Loaded:\n{os.path.basename(file_path)}")
+                self.depth_path = file_path
+                self.lbl_depth.setText(f"Depth Video Loaded:\n{os.path.basename(file_path)}")
                 self.lbl_depth.setStyleSheet("background-color: #1e3d1e; color: white; border: 2px solid green;")
+            self.init_video_captures()
 
-            if self.img_color is not None and self.img_depth is not None:
-                self.btn_export.setEnabled(True)
-                self.zoom_level = 1.0
-                self.pan_x, self.pan_y = 0.0, 0.0
-                self.update_preview()
+    def load_initial_videos(self, c_path, d_path):
+        if os.path.exists(c_path) and os.path.exists(d_path):
+            self.color_path, self.depth_path = c_path, d_path
+            self.lbl_color.setText(f"Color Loaded:\n{os.path.basename(c_path)}")
+            self.lbl_color.setStyleSheet("background-color: #1e3d1e; color: white; border: 2px solid green;")
+            self.lbl_depth.setText(f"Depth Loaded:\n{os.path.basename(d_path)}")
+            self.lbl_depth.setStyleSheet("background-color: #1e3d1e; color: white; border: 2px solid green;")
+            self.init_video_captures()
 
-    # --- Mouse Event Matrices (Pan & Zoom) ---
+    def init_video_captures(self):
+        if not self.color_path or not self.depth_path: return
+        if self.cap_color: self.cap_color.release()
+        if self.cap_depth: self.cap_depth.release()
+
+        self.cap_color = cv2.VideoCapture(self.color_path)
+        self.cap_depth = cv2.VideoCapture(self.depth_path)
+
+        f_color = int(self.cap_color.get(cv2.CAP_PROP_FRAME_COUNT))
+        f_depth = int(self.cap_depth.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.total_frames = min(f_color, f_depth)
+        self.current_frame_idx = 0
+
+        if self.total_frames > 0:
+            self.btn_play.setEnabled(True)
+            self.btn_export.setEnabled(True)
+            self.btn_sync_minus.setEnabled(True)
+            self.btn_sync_plus.setEnabled(True)
+            
+            self.slider_timeline.setEnabled(True)
+            self.slider_timeline.setRange(0, self.total_frames - 1)
+            self.slider_timeline.setValue(0)
+            
+            # Match project refresh cadence dynamically to the source frame rate
+            fps = self.cap_color.get(cv2.CAP_PROP_FPS) or 30.0
+            self.play_timer.setInterval(int(1000 / fps))
+            
+            self.update_preview()
+
+    # --- Timeline Scrubbing Interceptors ---
+    def on_timeline_scrub(self, position):
+        self.current_frame_idx = position
+        self.update_preview()
+
+    def on_scrub_start(self):
+        # Pause playback loop while user actively drags the scrubber
+        self.was_playing_before_scrub = self.is_playing
+        if self.is_playing:
+            self.play_timer.stop()
+
+    def on_scrub_stop(self):
+        # Restore playback loop once scrubbing ends
+        if getattr(self, 'was_playing_before_scrub', False):
+            self.play_timer.start()
+
+    def toggle_playback(self):
+        if self.is_playing:
+            self.is_playing = False
+            self.play_timer.stop()
+            self.btn_play.setText("▶ Play Loop")
+            self.btn_play.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold;")
+        else:
+            self.is_playing = True
+            self.play_timer.start()
+            self.btn_play.setText("⏸ Pause")
+            self.btn_play.setStyleSheet("background-color: orange; color: white; font-weight: bold;")
+
+    def advance_loop_frame(self):
+        if self.current_frame_idx >= self.total_frames - 1:
+            self.current_frame_idx = 0
+        else:
+            self.current_frame_idx += 1
+            
+        self.slider_timeline.setValue(self.current_frame_idx)
+        self.update_preview()
+
+    def adjust_sync(self, delta):
+        self.depth_frame_offset += delta
+        self.lbl_sync_val.setText(f"Sync: {self.depth_frame_offset:+}")
+        self.update_preview()
+
+    # --- Coordinate Systems (Pan & Zoom) ---
     def start_pan(self, event):
         if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
             self.drag_start = event.position()
 
     def execute_pan(self, event):
-        if self.img_color is None or self.drag_start is None: return
+        if self.cap_color is None or self.drag_start is None: return
         delta = event.position() - self.drag_start
         self.pan_x += delta.x()
         self.pan_y += delta.y()
@@ -210,7 +306,7 @@ class ProDepthBlurQtApp(QMainWindow):
         self.update_preview()
 
     def execute_zoom(self, event):
-        if self.img_color is None: return
+        if self.cap_color is None: return
         factor = 1.1 if event.angleDelta().y() > 0 else 0.9
         new_zoom = max(0.1, min(self.zoom_level * factor, 30.0))
         
@@ -225,7 +321,7 @@ class ProDepthBlurQtApp(QMainWindow):
         self.zoom_level = new_zoom
         self.update_preview()
 
-    # --- Aperture Core Convolution Logic ---
+    # --- Polygonal Optical Filter Core ---
     def create_polygonal_kernel(self, size, sides):
         if sides < 3:
             kernel = np.zeros((size, size), dtype=np.float32)
@@ -271,13 +367,23 @@ class ProDepthBlurQtApp(QMainWindow):
         mask_3d = cv2.merge([depth_mask, depth_mask, depth_mask])
         return (color_img * mask_3d + bokeh_blurred_img * (1.0 - mask_3d)).astype('uint8')
 
-    # --- Live Render Display Engine ---
+    # --- Frame Retrieval & Split Clipping Render ---
     def update_preview(self):
-        if self.img_color is None or self.img_depth is None: return
+        if not self.cap_color or not self.cap_depth: return
+
+        # Synchronised offset pointer arithmetic
+        target_d_frame = max(0, min(self.current_frame_idx + self.depth_frame_offset, int(self.cap_depth.get(cv2.CAP_PROP_FRAME_COUNT)) - 1))
+
+        self.cap_color.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame_idx)
+        self.cap_depth.set(cv2.CAP_PROP_POS_FRAMES, target_d_frame)
+        
+        ret1, frame_color = self.cap_color.read()
+        ret2, frame_depth = self.cap_depth.read()
+        if not ret1 or not ret2: return
 
         c_w, c_h = max(self.canvas.width(), 100), max(self.canvas.height(), 100)
-        processed_full = self.process_depth_blur(self.img_color, self.img_depth)
-        orig_h, orig_w = self.img_color.shape[:2]
+        processed_full = self.process_depth_blur(frame_color, frame_depth)
+        orig_h, orig_w = frame_color.shape[:2]
 
         if self.chk_split.isChecked():
             v_w = c_w // 2
@@ -286,7 +392,7 @@ class ProDepthBlurQtApp(QMainWindow):
             render_h = int(orig_h * scale_base * self.zoom_level)
             if render_w < 1 or render_h < 1: return
 
-            full_resized_src = cv2.resize(self.img_color, (render_w, render_h))
+            full_resized_src = cv2.resize(frame_color, (render_w, render_h))
             full_resized_proc = cv2.resize(processed_full, (render_w, render_h))
 
             left_x = int((self.pan_x + (v_w // 2)) - (render_w / 2))
@@ -332,13 +438,9 @@ class ProDepthBlurQtApp(QMainWindow):
         rgb_img = cv2.cvtColor(composite_view, cv2.COLOR_BGR2RGB)
         q_img = QImage(rgb_img.data, c_w, c_h, c_w * 3, QImage.Format.Format_RGB888)
         self.canvas.setPixmap(QPixmap.fromImage(q_img))
+        self.lbl_time_status.setText(f"Frame: {self.current_frame_idx + 1} / {self.total_frames}")
 
-    # --- Layout Event Listeners ---
-    def showEvent(self, event):
-        # Trigger an extra update once the parent window geometry expands on screen
-        super().showEvent(event)
-        self.update_preview()
-
+    # --- Listeners ---
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_preview()
@@ -359,33 +461,54 @@ class ProDepthBlurQtApp(QMainWindow):
         self.dof_thickness = val
         self.update_preview()
 
-    def export_image(self):
-        if self.img_color is None or self.img_depth is None: return
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export Composite Image", "", "PNG Image (*.png);;JPEG Image (*.jpg)")
-        if file_path:
-            final_composite = self.process_depth_blur(self.img_color, self.img_depth)
-            cv2.imwrite(file_path, final_composite)
-            QMessageBox.information(self, "Success", f"Composite exported cleanly to:\n{file_path}")
+    # --- Full Resolution Video Sequencer Export ---
+    def export_video(self):
+        if self.is_playing: self.toggle_playback()
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export Composite Video Track", "", "MP4 Video (*.mp4)")
+        if not file_path: return
 
+        fps = self.cap_color.get(cv2.CAP_PROP_FPS) or 30.0
+        width = int(self.cap_color.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.cap_color.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        t_depth = int(self.cap_depth.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        out = cv2.VideoWriter(file_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+
+        # Block workspace layout changes during heavy background multi-thread rendering loops
+        self.setEnabled(False)
+        self.setWindowTitle("🎬 PROCESSING VIDEO SEQUENCES - PLEASE WAIT...")
+
+        for idx in range(self.total_frames):
+            td = max(0, min(idx + self.depth_frame_offset, t_depth - 1))
+            self.cap_color.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            self.cap_depth.set(cv2.CAP_PROP_POS_FRAMES, td)
+            
+            ret1, f_color = self.cap_color.read()
+            ret2, f_depth = self.cap_depth.read()
+            if not ret1 or not ret2: break
+
+            out.write(self.process_depth_blur(f_color, f_depth))
+
+        out.release()
+        self.setEnabled(True)
+        self.setWindowTitle("Pro Depth Map Video Sync & Focus Engine - PySide6")
+        QMessageBox.information(self, "Success", f"Composite video written natively at original full resolution dimensions to:\n{file_path}")
+        self.update_preview()
+
+    
 if __name__ == "__main__":
     from PySide6.QtCore import QObject, Signal
 
-    # Parse image paths from sys.argv (set by the plugin host before exec()ing this file)
-    color_arg = None
-    depth_arg = None
-    if hasattr(sys, 'argv') and isinstance(sys.argv, list):
-        image_args = [a for a in sys.argv if isinstance(a, str) and a.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        if len(image_args) >= 2:
-            color_arg, depth_arg = image_args[0], image_args[1]
-        elif len(sys.argv) > 2:
-            color_arg, depth_arg = str(sys.argv[1]), str(sys.argv[2])
+    # Parse video paths from sys.argv (set by the plugin host before exec()ing this file)
+    color_arg = sys.argv[1] if len(sys.argv) > 1 else None
+    depth_arg = sys.argv[2] if len(sys.argv) > 2 else None
 
     app = QApplication.instance()
 
     if app is None:
         # ── Standalone mode: running outside LichtFeld ──────────────────────
         app = QApplication(sys.argv)
-        window = ProDepthBlurQtApp(color_arg, depth_arg)
+        window = ProDepthBlurVideoApp(color_arg, depth_arg)
         window.show()
         app.exec()          # no sys.exit() — keeps the process alive cleanly
     else:
@@ -419,18 +542,18 @@ if __name__ == "__main__":
                 self.fire.emit()
 
             def _create(self):
-                old = getattr(_main_module, '_dof_still_window', None)
+                old = getattr(_main_module, '_dof_video_window', None)
                 if old is not None:
                     try:
                         old.close()
                         old.deleteLater()
                     except Exception:
                         pass
-                w = ProDepthBlurQtApp(self._rgb, self._gsc)
+                w = ProDepthBlurVideoApp(self._rgb, self._gsc)
                 w.show()
-                setattr(_main_module, '_dof_still_window', w)
+                setattr(_main_module, '_dof_video_window', w)
                 # Keep trampoline alive until after _create runs, then release it
-                setattr(_main_module, '_dof_still_window_trampoline', None)
+                setattr(_main_module, '_dof_video_window_trampoline', None)
 
         # Store trampoline on __main__ so it isn't GC'd before the signal fires
-        _main_module._dof_still_window_trampoline = _Trampoline(color_arg, depth_arg)
+        _main_module._dof_video_window_trampoline = _Trampoline(color_arg, depth_arg)
