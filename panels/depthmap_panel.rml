@@ -1,0 +1,298 @@
+<rml>
+<head>
+<style>
+  .btn-active    { color: #ffffff; background-color: #1a4a1a; border-color: #2a7a2a; }
+  .btn-inactive  { color: #aaaaaa; }
+  .btn-danger    { color: #ff4444; border-color: #662222; background-color: #2a0a0a; }
+  .btn-pick      { color: #00ff88; border-color: #006633; background-color: #002211; }
+  .text-ok       { color: #44ff44; }
+  .text-err      { color: #ff4444; }
+  .text-warn     { color: #ffcc44; }
+  .text-dim      { color: #888888; }
+  .text-p1       { color: #44ff44; }
+  .text-p2       { color: #ff8800; }
+  .progress-wrap { background-color: #1a1a1a; height: 18dp; width: 100%; margin: 2dp 0; }
+  .progress-fill { background-color: #336633; height: 100%; }
+</style>
+</head>
+<body data-model="depthmap_panel">
+<div id="content-wrap"><div id="content">
+
+  <!-- ── No splat ──────────────────────────────────────────────────── -->
+  <div data-if="no_splat">
+    <span class="text-dim">Select a splat or point cloud</span>
+  </div>
+
+  <div data-if="has_splat">
+
+    <!-- ── Header ──────────────────────────────────────────────────── -->
+    <span class="section-label">Target: {{target_name}}</span>
+
+    <div class="btn-row">
+      <div data-if="enabled">
+        <button class="btn btn-active" data-event-click="toggle_enable"
+                title="Disable the depth map.">Depth Map: ON</button>
+      </div>
+      <div data-if="disabled">
+        <button class="btn" data-event-click="toggle_enable"
+                title="Enable the depth map.">Depth Map: OFF</button>
+      </div>
+      <div data-if="live_preview">
+        <button class="btn btn-active" data-event-click="toggle_live"
+                title="Automatically update when settings change.">Live Preview: ON</button>
+      </div>
+      <div data-if="not_live_preview">
+        <button class="btn" data-event-click="toggle_live"
+                title="Automatically update when settings change.">Live Preview: OFF</button>
+      </div>
+    </div>
+
+    <div class="separator"></div>
+
+    <!-- ── Colormap ─────────────────────────────────────────────────── -->
+
+    <span class="section-label" style="color:#4A90D9;">Colormap</span>
+    <div class="btn-row">
+	  <button class="btn" data-event-click="set_cmap_0" data-class-btn-active="cmap_0_active" title="Grayscale colormap.">Gray</button>
+      <button class="btn" data-event-click="set_cmap_1" data-class-btn-active="cmap_1_active" title="Jet rainbow colormap.">Jet</button>
+      <button class="btn" data-event-click="set_cmap_2" data-class-btn-active="cmap_2_active" title="Turbo colormap.">Turbo</button>
+      <button class="btn" data-event-click="set_cmap_3" data-class-btn-active="cmap_3_active" title="Viridis colormap.">Viridis</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn" data-event-click="toggle_invert"
+              data-class-btn-active="invert"
+              title="Invert the colormap.">Invert</button>
+    </div>
+    <span class="text-dim">Active: {{colormap_label}}</span>
+
+    <div class="separator"></div>
+    <!-- ── Presets ───────────────────────────────────────────────────── -->
+    <span class="section-label" style="color:#4A90D9;">Presets</span>
+    <div class="btn-row">
+      <button class="btn" data-event-click="preset_jet_z"   title="Jet colormap, Z axis.">Jet Z</button>
+      <button class="btn" data-event-click="preset_gray_z"  title="Grayscale, Z axis.">Gray Z</button>
+      <button class="btn" data-event-click="preset_turbo_z" title="Turbo colormap, Z axis.">Turbo Z</button>
+      <button class="btn" data-event-click="preset_cam_p"   title="Greyscale, camera projective axis.">Cam P</button>
+      <button class="btn" data-event-click="preset_cam_o"   title="Greyscale, camera radial (spherical) axis.">Cam O</button>
+    </div>
+	
+    <div class="separator"></div>	
+	
+    <!-- ── Depth Axis ────────────────────────────────────────────────── -->
+    <span class="section-label" style="color:#4A90D9;">Depth Axis</span>
+    <div class="btn-row">
+      <button class="btn" data-event-click="set_axis_0" data-class-btn-active="axis_0_active" title="Z-axis world depth.">Z</button>
+      <button class="btn" data-event-click="set_axis_1" data-class-btn-active="axis_1_active" title="Y-axis height.">Y</button>
+      <button class="btn" data-event-click="set_axis_2" data-class-btn-active="axis_2_active" title="X-axis side.">X</button>
+      <button class="btn" data-event-click="set_axis_3" data-class-btn-active="axis_3_active" title="Camera projective (flat bands).">Cam P</button>
+      <button class="btn" data-event-click="set_axis_4" data-class-btn-active="axis_4_active" title="Camera radial (spherical) — Greyscale.">Cam O</button>
+    </div>
+    <span class="text-dim">Active: {{axis_label}}</span>
+
+    <div class="separator"></div>
+
+    <!-- ── Depth Range ──────────────────────────────────────────────── -->
+    <span class="section-label" style="color:#4A90D9;">Depth Range</span>
+
+    <!-- Point 1 -->
+    <div data-if="point1_set">
+      <span class="text-p1">{{point1_label}}</span>
+    </div>
+    <div data-if="point1_unset">
+      <span class="text-dim">{{point1_label}}</span>
+    </div>
+    <div data-if="not_picking_p1" class="btn-row">
+      <button class="btn" data-event-click="pick_p1"
+              title="Click on model to set the minimum depth point.">Pick Point 1</button>
+    </div>
+    <div data-if="picking_p1" class="btn-row">
+      <button class="btn btn-danger" data-event-click="stop_pick"
+              title="Stop picking.">[x] Stop Picking P1</button>
+    </div>
+
+    <!-- Point 2 -->
+    <div data-if="point2_set">
+      <span class="text-p2">{{point2_label}}</span>
+    </div>
+    <div data-if="point2_unset">
+      <span class="text-dim">{{point2_label}}</span>
+    </div>
+    <div class="btn-row">
+      <div data-if="not_picking_p2">
+        <button class="btn" data-event-click="pick_p2"
+                title="Click on model to set the maximum depth point.">Pick Point 2</button>
+      </div>
+      <div data-if="picking_p2">
+        <button class="btn btn-danger" data-event-click="stop_pick"
+                title="Stop picking.">[x] Stop Picking P2</button>
+      </div>
+    </div>
+
+    <!-- Clear -->
+    <div data-if="has_points">
+      <div class="btn-row">
+        <button class="btn" data-event-click="clear_points"
+                title="Clear both depth range points.">Clear Points</button>
+      </div>
+    </div>
+
+    <!-- Fine tune -->
+    <div data-if="has_range">
+      <div class="separator"></div>
+      <span class="section-label" style="color:#4A90D9;">Fine-tune Range</span>
+
+      <div class="setting-row">
+        <span class="prop-label" style="color:#44ff44;">Min</span>
+        <input type="text" class="number-input" data-value="min_depth_val" style="width:6em;" />
+        <button class="btn" data-event-click="min_sub1"  style="min-width:2em;">-1</button>
+        <button class="btn" data-event-click="min_add1"  style="min-width:2em;">+1</button>
+        <button class="btn" data-event-click="min_sub01" style="min-width:2.5em;">-.1</button>
+        <button class="btn" data-event-click="min_add01" style="min-width:2.5em;">+.1</button>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label" style="color:#44ff44;"></span>
+        <button class="btn" data-event-click="min_sub001" style="min-width:2.8em;">-.01</button>
+        <button class="btn" data-event-click="min_add001" style="min-width:2.8em;">+.01</button>
+      </div>
+
+      <div class="setting-row">
+        <span class="prop-label" style="color:#ff8800;">Max</span>
+        <input type="text" class="number-input" data-value="max_depth_val" style="width:6em;" />
+        <button class="btn" data-event-click="max_sub1"  style="min-width:2em;">-1</button>
+        <button class="btn" data-event-click="max_add1"  style="min-width:2em;">+1</button>
+        <button class="btn" data-event-click="max_sub01" style="min-width:2.5em;">-.1</button>
+        <button class="btn" data-event-click="max_add01" style="min-width:2.5em;">+.1</button>
+      </div>
+      <div class="setting-row">
+        <span class="prop-label" style="color:#ff8800;"></span>
+        <button class="btn" data-event-click="max_sub001" style="min-width:2.8em;">-.01</button>
+        <button class="btn" data-event-click="max_add001" style="min-width:2.8em;">+.01</button>
+      </div>
+
+      <div data-if="min_gt_max">
+        <div class="btn-row">
+          <span class="text-warn">Min &gt; Max!</span>
+          <button class="btn" data-event-click="swap_range" title="Swap Min and Max.">Swap</button>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn" data-event-click="toggle_range_only"
+                data-class-btn-active="range_only"
+                title="Only color splats within the depth range, keep original colors outside.">Only Color Within Range</button>
+      </div>
+    </div>
+
+    <div data-if="has_range" style="display:none;"></div><!-- spacer logic handled above -->
+
+    <div class="separator"></div>
+
+    <!-- ── Apply / Restore ──────────────────────────────────────────── -->
+    <div data-if="disabled">
+      <div class="btn-row">
+        <button class="btn" data-event-click="apply_depthmap"
+                title="Apply the depth map to the splat.">Apply Depth Map</button>
+      </div>
+    </div>
+    <div data-if="enabled">
+      <div class="btn-row">
+        <button class="btn" data-event-click="update_depthmap"
+                title="Re-apply with current settings.">Update Depth Map</button>
+        <button class="btn" data-event-click="restore_original"
+                title="Restore the original splat colors.">Restore Original</button>
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div data-if="has_status">
+      <div data-if="status_ok">
+        <span class="text-ok">{{status_msg}}</span>
+      </div>
+      <div data-if="status_err">
+        <span class="text-err">{{status_msg}}</span>
+      </div>
+    </div>
+
+    <div class="separator"></div>
+
+    <!-- ── Render Depth Video ────────────────────────────────────────── -->
+    <span class="section-label" style="color:#4A90D9;">Render Depth Video</span>
+
+    <div class="setting-row">
+      <span class="prop-label">Output</span>
+      <input type="text" class="number-input" data-value="render_output_dir" style="flex:1;" />
+    </div>
+    <div class="setting-row">
+      <span class="prop-label">Frames</span>
+      <input type="text" class="number-input" data-value="render_frames_str" style="width:5em;" />
+      <span class="prop-label" style="margin-left:8dp;">FPS</span>
+      <input type="text" class="number-input" data-value="render_fps_str" style="width:3em;" />
+    </div>
+    <span class="text-dim">{{render_duration_str}}</span>
+
+    <div data-if="render_active">
+      <span class="text-warn">{{render_status}}  ({{render_progress_pct}})</span>
+      <div class="btn-row">
+        <button class="btn btn-danger" data-event-click="cancel_render"
+                title="Cancel the render.">Cancel Render</button>
+      </div>
+    </div>
+
+    <div data-if="render_idle">
+      <div class="btn-row">
+        <button class="btn" data-event-click="do_render_video"
+                title="Render depth map frames and encode to video.">Render Depth Video</button>
+      </div>
+      <div data-if="render_status_ok">
+        <span class="text-ok">{{render_status}}</span>
+      </div>
+      <div data-if="render_status_err">
+        <span class="text-err">{{render_status}}</span>
+      </div>
+    </div>
+
+    <div class="separator"></div>
+
+    <!-- ── Export Viewport PNG ───────────────────────────────────────── -->
+    <span class="section-label" style="color:#4A90D9;">Export Viewport PNG</span>
+
+    <div class="btn-row">
+      <button class="btn" data-event-click="set_vp_res_0" data-class-btn-active="vp_res_0_active" title="Capture at viewport resolution.">Viewport</button>
+      <button class="btn" data-event-click="set_vp_res_1" data-class-btn-active="vp_res_1_active" title="Render at 1080p.">1080p</button>
+      <button class="btn" data-event-click="set_vp_res_2" data-class-btn-active="vp_res_2_active" title="Render at 1440p.">1440p</button>
+      <button class="btn" data-event-click="set_vp_res_3" data-class-btn-active="vp_res_3_active" title="Render at 4K.">4K</button>
+      <button class="btn" data-event-click="set_vp_res_4" data-class-btn-active="vp_res_4_active" title="Render at 8K.">8K</button>
+    </div>
+    <span class="text-dim">{{vp_size_hint}}</span>
+
+    <div class="setting-row">
+      <span class="prop-label">PNG Compress</span>
+      <input type="range" class="setting-slider"
+             data-value="vp_compress_str"
+             data-attr-min="0" data-attr-max="9" data-attr-step="1" />
+      <input type="text" class="number-input" data-value="vp_compress_str" style="width:2.5em;" />
+    </div>
+
+    <div class="btn-row">
+      <button class="btn" data-event-click="toggle_vp_transp"
+              data-class-btn-active="vp_transparency"
+              title="Export as RGBA PNG using black/white background BW2A method.">Transparency (RGBA)</button>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn" data-event-click="do_vp_export"
+              title="Export the current viewport as a PNG file.">{{vp_export_label}}</button>
+    </div>
+
+    <div data-if="vp_status_ok">
+      <span class="text-ok">{{vp_status}}</span>
+    </div>
+    <div data-if="vp_status_err">
+      <span class="text-err">{{vp_status}}</span>
+    </div>
+
+  </div><!-- end has_splat -->
+
+</div></div>
+</body>
+</rml>
