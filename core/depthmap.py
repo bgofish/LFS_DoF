@@ -115,86 +115,174 @@ def compute_depth_values(
     return normalized, mask, actual_min, actual_max
 
 
-def _get_keyframe_positions():
-    """Read all keyframe camera positions from the scene graph."""
+def _get_keyframe_transforms():
+    """Read full 4x4 world_transform from each keyframe node.
+    Returns list of np.ndarray shape (4,4), one per keyframe in order."""
     try:
         rs = lf.get_render_scene()
         nodes = list(rs.get_nodes())
-        kf_container = next((n for n in nodes if getattr(n, 'name', '') == 'Keyframes'), None)
+        kf_container = next(
+            (n for n in nodes if getattr(n, 'name', '') == 'Keyframes'), None)
         if kf_container is None:
             return []
-        positions = []
+        transforms = []
         for child_id in kf_container.children:
             child = rs.get_node_by_id(child_id)
-            t = child.world_transform
-            positions.append(np.array([t[0][3], t[1][3], t[2][3]], dtype=np.float32))
-        return positions
+            t = np.array(child.world_transform, dtype=np.float64)  # (4,4)
+            transforms.append(t)
+        return transforms
     except Exception as e:
         _depth_log(f"KEYFRAMES | read error: {e}")
         return []
 
 
-def _interpolate_keyframe_pos(positions, current_frame, total_frames):
-    """Linearly interpolate camera position along keyframe list."""
-    n = len(positions)
+def _mat3_to_quat(m):
+    """Convert 3x3 rotation matrix to quaternion [w, x, y, z]."""
+    m = np.array(m, dtype=np.float64)
+    trace = m[0,0] + m[1,1] + m[2,2]
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (m[2,1] - m[1,2]) * s
+        y = (m[0,2] - m[2,0]) * s
+        z = (m[1,0] - m[0,1]) * s
+    elif m[0,0] > m[1,1] and m[0,0] > m[2,2]:
+        s = 2.0 * np.sqrt(1.0 + m[0,0] - m[1,1] - m[2,2])
+        w = (m[2,1] - m[1,2]) / s
+        x = 0.25 * s
+        y = (m[0,1] + m[1,0]) / s
+        z = (m[0,2] + m[2,0]) / s
+    elif m[1,1] > m[2,2]:
+        s = 2.0 * np.sqrt(1.0 + m[1,1] - m[0,0] - m[2,2])
+        w = (m[0,2] - m[2,0]) / s
+        x = (m[0,1] + m[1,0]) / s
+        y = 0.25 * s
+        z = (m[1,2] + m[2,1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + m[2,2] - m[0,0] - m[1,1])
+        w = (m[1,0] - m[0,1]) / s
+        x = (m[0,2] + m[2,0]) / s
+        y = (m[1,2] + m[2,1]) / s
+        z = 0.25 * s
+    q = np.array([w, x, y, z], dtype=np.float64)
+    return q / np.linalg.norm(q)
+
+
+def _quat_slerp(q1, q2, t):
+    """Spherical linear interpolation between two quaternions."""
+    q1 = q1 / np.linalg.norm(q1)
+    q2 = q2 / np.linalg.norm(q2)
+    dot = np.dot(q1, q2)
+    # Ensure shortest path
+    if dot < 0.0:
+        q2 = -q2
+        dot = -dot
+    dot = min(1.0, dot)
+    if dot > 0.9995:
+        # Nearly identical — linear interpolate
+        return (q1 + t * (q2 - q1)) / np.linalg.norm(q1 + t * (q2 - q1))
+    theta0 = np.arccos(dot)
+    theta  = theta0 * t
+    sin0   = np.sin(theta0)
+    return (np.sin(theta0 - theta) / sin0) * q1 + (np.sin(theta) / sin0) * q2
+
+
+def _quat_to_mat3(q):
+    """Convert quaternion [w, x, y, z] to 3x3 rotation matrix."""
+    w, x, y, z = q / np.linalg.norm(q)
+    return np.array([
+        [1-2*(y*y+z*z),   2*(x*y-z*w),   2*(x*z+y*w)],
+        [  2*(x*y+z*w), 1-2*(x*x+z*z),   2*(y*z-x*w)],
+        [  2*(x*z-y*w),   2*(y*z+x*w), 1-2*(x*x+y*y)],
+    ], dtype=np.float64)
+
+
+def _interpolate_keyframe_transform(transforms, current_frame, total_frames):
+    """Interpolate between keyframe transforms using SLERP for rotation
+    and linear interpolation for translation — prevents orientation flipping."""
+    n = len(transforms)
     if n == 0:
         return None
     if n == 1:
-        return positions[0]
+        return transforms[0]
+
     t = (current_frame / max(total_frames - 1, 1)) * (n - 1)
     i = int(t)
     i = max(0, min(i, n - 2))
     frac = t - i
-    return positions[i] * (1.0 - frac) + positions[i + 1] * frac
+
+    m0, m1 = transforms[i], transforms[i + 1]
+
+    # Linear interpolation for translation
+    pos = m0[:3, 3] * (1.0 - frac) + m1[:3, 3] * frac
+
+    # SLERP for rotation
+    q0 = _mat3_to_quat(m0[:3, :3])
+    q1 = _mat3_to_quat(m1[:3, :3])
+    q  = _quat_slerp(q0, q1, frac)
+    rot = _quat_to_mat3(q)
+
+    # Rebuild 4x4
+    result = np.eye(4, dtype=np.float64)
+    result[:3, :3] = rot
+    result[:3,  3] = pos
+    return result
 
 
-def _get_export_camera_pos(current_frame=None, total_frames=None) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Get camera world position and forward vector for the current frame.
-
-    Returns:
-        (position, forward) — both np.ndarray [3], or (None, None) on failure.
-
-    Forward vector is the -Z column of view.rotation (3x3 matrix).
-    Confirmed via diagnostic at 3 angles: pos->origin matches -rot[:,2] in all cases.
-
-    During export: position is interpolated from keyframe world_transform translations.
-    Forward always comes from the live viewport — keyframe world_transforms are static
-    and do not update during playback.
+def _camera_state_from_transform(m, fov=None):
+    """Extract eye, target, up from a 4x4 camera world_transform.
+    Column 3 = eye, Column 2 = -forward (camera looks down -Z), Column 1 = up.
     """
+    eye     = m[:3, 3]
+    forward = -m[:3, 2]   # camera looks down -Z
+    norm = np.linalg.norm(forward)
+    if norm > 1e-6:
+        forward = forward / norm
+    up = m[:3, 1]
+    up_norm = np.linalg.norm(up)
+    if up_norm > 1e-6:
+        up = up / up_norm
+    target = eye + forward * 10.0
+    return eye, target, up
+
+
+def _get_export_camera_pos(current_frame=None, total_frames=None):
+    """Get camera position and forward for the current frame.
+    Returns (position, forward) as np.ndarray[3], or (None, None) on failure.
+    When keyframes exist the full transform is interpolated so both position
+    and orientation follow the sequencer path exactly."""
     camera_pos = None
     camera_fwd = None
 
-    # Always get forward + position from live viewport first
+    # Live viewport fallback
     try:
         view = lf.get_current_view()
         if view is not None:
-            if hasattr(view, 'position'):
-                camera_pos = np.array(view.position, dtype=np.float32)
+            camera_pos = np.array(view.position, dtype=np.float32)
             if hasattr(view, 'rotation'):
-                rot = view.rotation.numpy()  # 3x3, confirmed via CAM_DIAG3
-                # Forward = -Z column, with X negated to correct left->right hand chirality
-                # (rotation matrix has det=-1 in Lichtfeld's +Y up convention)
-                fwd = np.array([rot[0][2], -rot[1][2], -rot[2][2]], dtype=np.float32)
+                rot = np.array(view.rotation.numpy())
+                fwd = np.array([-rot[0][2], rot[1][2], rot[2][2]], dtype=np.float32)
                 norm = np.linalg.norm(fwd)
                 if norm > 1e-6:
                     camera_fwd = fwd / norm
-                    _depth_log(f"CAM_FWD | -Z col => ({camera_fwd[0]:.3f},{camera_fwd[1]:.3f},{camera_fwd[2]:.3f})")
     except Exception as e:
         _depth_log(f"CAM_SRC | get_current_view error: {e}")
 
-    # Export path: override position with interpolated keyframe position
+    # Keyframe path override
     if current_frame is not None and total_frames is not None and total_frames > 0:
-        kf_positions = _get_keyframe_positions()
-        _depth_log(f"CAM_KF | frame={current_frame}/{total_frames} keyframes={len(kf_positions)}")
-        if kf_positions:
-            kf_pos = _interpolate_keyframe_pos(kf_positions, current_frame, total_frames)
-            if kf_pos is not None:
-                camera_pos = kf_pos
-                _depth_log(f"CAM_SRC | keyframe_interp => ({camera_pos[0]:.3f},{camera_pos[1]:.3f},{camera_pos[2]:.3f})")
-
-    if camera_pos is not None:
-        _depth_log(f"CAM_SRC | final pos=({camera_pos[0]:.3f},{camera_pos[1]:.3f},{camera_pos[2]:.3f}) "
-                   f"fwd={('({:.3f},{:.3f},{:.3f})'.format(*camera_fwd)) if camera_fwd is not None else 'None'}")
+        transforms = _get_keyframe_transforms()
+        _depth_log(f"CAM_KF | frame={current_frame}/{total_frames} keyframes={len(transforms)}")
+        if transforms:
+            m = _interpolate_keyframe_transform(transforms, current_frame, total_frames)
+            if m is not None:
+                eye, target, up = _camera_state_from_transform(m)
+                camera_pos = eye.astype(np.float32)
+                # Use live-viewport forward convention for depth shading
+                # (only X negated) — separate from render_at target direction
+                camera_fwd = np.array([-m[0,2], m[1,2], m[2,2]], dtype=np.float32)
+                norm = np.linalg.norm(camera_fwd)
+                if norm > 1e-6:
+                    camera_fwd = camera_fwd / norm
 
     return camera_pos, camera_fwd
 
