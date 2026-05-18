@@ -368,7 +368,7 @@ class ProDepthBlurQtApp(QMainWindow):
             QMessageBox.information(self, "Success", f"Composite exported cleanly to:\n{file_path}")
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     
     # Check system arguments array for input image file paths
     color_arg = sys.argv[1] if len(sys.argv) > 1 else None
@@ -376,4 +376,4 @@ if __name__ == "__main__":
     
     window = ProDepthBlurQtApp(color_arg, depth_arg)
     window.show()
-    sys.exit(app.exec())
+    app.exec()  # no sys.exit()
