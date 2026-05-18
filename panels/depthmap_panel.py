@@ -450,6 +450,7 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind_event("toggle_vp_transp", self._on_toggle_vp_transp)
         model.bind_func("vp_export_label",  lambda: f"Export {VP_RESOLUTIONS[self._vp_export_resolution_idx][0]} PNG")
         model.bind_event("do_vp_export",    self._on_vp_export)
+        model.bind_event("open_dof",         self._on_open_dof)
         model.bind_func("vp_status",        lambda: self._vp_export_status)
         model.bind_func("vp_status_ok",     lambda: bool(self._vp_export_status) and self._vp_export_status_ok)
         model.bind_func("vp_status_err",    lambda: bool(self._vp_export_status) and not self._vp_export_status_ok)
@@ -1104,6 +1105,35 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         self._vp_export_transparency = not self._vp_export_transparency
         self._dirty("vp_transparency")
 
+    def _on_open_dof(self, h, e, a):
+        """Launch the DoF compositor with the last written file pair."""
+        rgb_path = os.path.join(self._render_output_dir, "VIEWPORT_DRGB.png")
+        gsc_path = os.path.join(self._render_output_dir, "VIEWPORT_DGSC.png")
+        missing = [p for p in (rgb_path, gsc_path) if not os.path.exists(p)]
+        if missing:
+            self._vp_set_status(
+                f"File not found: {os.path.basename(missing[0])}", error=True)
+            return
+        script = str(Path(__file__).parent.parent / "python" / "Still-DoF_Bokeh.py")
+        try:
+            import threading as _t, sys as _sys
+
+            def _launch(rgb=rgb_path, gsc=gsc_path, scr=script):
+                _sys.argv = [scr, rgb, gsc]
+                code = Path(scr).read_text(encoding="utf-8")
+                try:
+                    exec(compile(code, scr, "exec"),
+                         {"__name__": "__main__", "__file__": scr})
+                except SystemExit:
+                    pass
+
+            _t.Thread(target=_launch, daemon=True).start()
+            self._vp_set_status(
+                f"Opening DoF: {os.path.basename(rgb_path)} + "
+                f"{os.path.basename(gsc_path)}", success=True)
+        except Exception as e:
+            self._vp_set_status(f"Launch error: {e}", error=True)
+
     def _on_vp_export(self, h, e, a):
         """Dual-capture export for Still-DoF_Bokeh.py:
         1. Restore original colours  → capture → VIEWPORT_DRGB.png  (colour, depth OFF)
@@ -1149,8 +1179,11 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                         self._vp_set_status("RGB capture failed.", error=True)
                         lf.remove_draw_handler("depthmap.dof_seq")
                         return
-                    _vp_arr_to_image(arr).save(rgb_path, "PNG",
-                                               compress_level=self._vp_export_compress)
+                    img = _vp_arr_to_image(arr)
+                    with open(rgb_path, "wb") as fh:
+                        img.save(fh, "PNG", compress_level=self._vp_export_compress)
+                        fh.flush()
+                        os.fsync(fh.fileno())
                     self._vp_set_status("RGB saved — applying depthmap...", warning=True)
                 except Exception as e:
                     self._vp_set_status(f"RGB save error: {e}", error=True)
@@ -1167,15 +1200,21 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             elif s == 3:
                 # Capture depthmap viewport → VIEWPORT_DGSC.png
                 target_h = state["target_h"]
+                saved_ok = False
                 try:
                     arr = _vp_capture_arr(target_h)
                     if arr is None:
                         self._vp_set_status("Depth capture failed.", error=True)
                         lf.remove_draw_handler("depthmap.dof_seq")
                         return
-                    _vp_arr_to_image(arr).save(gsc_path, "PNG",
-                                               compress_level=self._vp_export_compress)
+                    # Explicit flush+close via context manager to guarantee OS write
+                    img = _vp_arr_to_image(arr)
+                    with open(gsc_path, "wb") as fh:
+                        img.save(fh, "PNG", compress_level=self._vp_export_compress)
+                        fh.flush()
+                        os.fsync(fh.fileno())
                     self._vp_set_status(f"Saved: {rgb_path} + {gsc_path}", success=True)
+                    saved_ok = True
                 except Exception as e:
                     self._vp_set_status(f"Depth save error: {e}", error=True)
                     lf.remove_draw_handler("depthmap.dof_seq")
@@ -1188,16 +1227,25 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                         self._enabled = False
                     self._dirty("enabled", "disabled")
 
-                # Launch Still-DoF_Bokeh.py as a subprocess — must be separate
-                # process because LichtFeld already has a QApplication running;
-                # creating a second one in-process crashes or silently fails.
+                if not saved_ok:
+                    return
+
+                # Launch in a thread — exec() runs app.exec() which blocks.
                 try:
-                    code = Path(script).read_text(encoding="utf-8")
-                    exec(compile(code, script, "exec"),
-                         {"__name__": "__main__",
-                          "__file__": script,
-                          "_color_path": rgb_path,
-                          "_depth_path": gsc_path})
+                    import threading as _t, sys as _sys
+
+                    def _launch(rgb=rgb_path, gsc=gsc_path, scr=script):
+                        import time as _time
+                        _time.sleep(0.5)
+                        _sys.argv = [scr, rgb, gsc]
+                        code = Path(scr).read_text(encoding="utf-8")
+                        try:
+                            exec(compile(code, scr, "exec"),
+                                 {"__name__": "__main__", "__file__": scr})
+                        except SystemExit:
+                            pass
+
+                    _t.Thread(target=_launch, daemon=True).start()
                 except Exception as e:
                     self._vp_set_status(f"Launch error: {e}", error=True)
 

@@ -281,7 +281,9 @@
 
     <div class="btn-row">
       <button class="btn" data-event-click="do_vp_export"
-              title="Export the current viewport as a PNG file.">{{vp_export_label}}</button>
+              title="Capture colour + depth viewports and open in DoF compositor.">{{vp_export_label}}</button>
+      <button class="btn" data-event-click="open_dof"
+              title="Open DoF compositor with last exported VIEWPORT_DRGB.png + VIEWPORT_DGSC.png.">Open DoF</button>
     </div>
 
     <div data-if="vp_status_ok">
