@@ -25,6 +25,7 @@ Click to Pick
 - You can click multiple times to adjust the point - each click updates the depth value.
 - Click the "Stop Picking" button or press ESC to exit picking mode.
 - Alternative Method using selection-based picking is also available
+
 ---
 
 ### Render Depth Video (WIP)
