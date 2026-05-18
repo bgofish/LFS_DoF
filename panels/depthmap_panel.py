@@ -12,7 +12,9 @@ import sys
 import numpy as np
 import lichtfeld as lf
 
-from ..core.depthmap import apply_depthmap_colors, _get_export_camera_pos
+from ..core.depthmap import (apply_depthmap_colors, _get_export_camera_pos,
+                             _get_keyframe_transforms, _interpolate_keyframe_transform,
+                             _camera_state_from_transform)
 
 # ── Viewport export helpers ───────────────────────────────────────────────────
 import re as _re
@@ -56,7 +58,28 @@ def _vp_fix_orientation(arr, from_render_at):
     arr = np.flip(arr, axis=0).copy()
     return arr
 
-def _vp_render_at_size(width, height, bg_color=None):
+def _vp_render_at_explicit(eye, target, up, fov, width, height):
+    """render_at with explicit camera params — reshapes and orients correctly."""
+    try:
+        tensor = lf.render_at(eye, target, width, height, fov, up)
+        if tensor is None:
+            _depth_log(f"render_at_explicit: tensor is None (w={width} h={height})")
+            return None
+        arr = tensor.numpy().astype(np.float32)
+        _depth_log(f"render_at_explicit: raw shape={arr.shape} w={width} h={height}")
+        # render_at may return [H*W, 1, C] — reshape to [H, W, C]
+        if arr.ndim == 3 and arr.shape[1] == 1:
+            arr = arr.reshape(height, width, arr.shape[2])
+        elif arr.ndim == 2:
+            arr = arr.reshape(height, width, -1)
+        _depth_log(f"render_at_explicit: after reshape={arr.shape}")
+        arr = _vp_fix_orientation(arr, from_render_at=True)
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            arr = arr[:, :, :3]
+        return arr
+    except Exception as e:
+        _depth_log(f"render_at_explicit error: {e}")
+        return None
     params = _vp_get_view_params()
     if params is None:
         return None
@@ -82,6 +105,11 @@ def _vp_render_at_size(width, height, bg_color=None):
         if tensor is None:
             return None
         arr = tensor.numpy().astype(np.float32)
+        # render_at may return [H*W, 1, C] — reshape to [H, W, C]
+        if arr.ndim == 3 and arr.shape[1] == 1:
+            arr = arr.reshape(height, width, arr.shape[2])
+        elif arr.ndim == 2:
+            arr = arr.reshape(height, width, -1)
         arr = _vp_fix_orientation(arr, from_render_at=True)
         if arr.ndim == 3 and arr.shape[2] == 4:
             arr = arr[:, :, :3]
@@ -301,6 +329,8 @@ class DepthmapPanel(lf.ui.Panel):
         self._render_frame_idx    = 0
         self._render_frame_paths  = []
         self._render_node_name    = ""
+        self._render_rgb_pass     = False  # True when doing the RGB second pass
+        self._render_rgb_paths    = []
 
         # Viewport export
         self._vp_export_resolution_idx = 0
@@ -311,6 +341,8 @@ class DepthmapPanel(lf.ui.Panel):
         self._vp_bw2a_state            = {"step": 0}
 
         self._settings_dirty   = False  # set by any handler; on_update applies if live
+        self._video_expanded   = True
+        self._export_expanded  = True
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -450,7 +482,19 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind_event("toggle_vp_transp", self._on_toggle_vp_transp)
         model.bind_func("vp_export_label",  lambda: f"Export {VP_RESOLUTIONS[self._vp_export_resolution_idx][0]} PNG")
         model.bind_event("do_vp_export",    self._on_vp_export)
-        model.bind_event("open_dof",         self._on_open_dof)
+        model.bind_event("open_dof",              self._on_open_dof)
+        model.bind_event("open_dof_still",        self._on_open_dof_still)
+        model.bind_event("open_dof_export_still",   self._on_vp_export)
+        model.bind_event("open_dof_video",        self._on_open_dof_video)
+        model.bind_event("browse_output",         self._on_browse_output)
+        model.bind_event("run_still_bat",         self._on_run_still_bat)
+        model.bind_event("open_output",           self._on_open_output)
+        model.bind_event("toggle_video_section",  self._on_toggle_video_section)
+        model.bind_event("toggle_export_section", self._on_toggle_export_section)
+        model.bind_func("video_collapsed",  lambda: not self._video_expanded)
+        model.bind_func("video_expanded",   lambda: self._video_expanded)
+        model.bind_func("export_collapsed", lambda: not self._export_expanded)
+        model.bind_func("export_expanded",  lambda: self._export_expanded)
         model.bind_func("vp_status",        lambda: self._vp_export_status)
         model.bind_func("vp_status_ok",     lambda: bool(self._vp_export_status) and self._vp_export_status_ok)
         model.bind_func("vp_status_err",    lambda: bool(self._vp_export_status) and not self._vp_export_status_ok)
@@ -486,7 +530,9 @@ class DepthmapPanel(lf.ui.Panel):
                     "render_status_ok", "render_status_err",
                     "vp_status", "vp_status_ok", "vp_status_err",
                     "min_gt_max",
-                    "live_preview", "not_live_preview",   # keep the toggle button highlight in sync
+                    "live_preview", "not_live_preview",
+                    "video_collapsed", "video_expanded",
+                    "export_collapsed", "export_expanded",
                     )
         return True
 
@@ -643,7 +689,7 @@ class DepthmapPanel(lf.ui.Panel):
         set_pick_callback(self._on_pick_result, point_num)
         try:
             lf.ui.ops.invoke(
-                "lfs_plugins.depthmap_viz.operators.point_picker.DEPTHMAP_OT_pick_point"
+                "lfs_plugins.DoF.operators.point_picker.DEPTHMAP_OT_pick_point"
             )
         except Exception as e:
             _depth_log(f"PICK start error: {e}")
@@ -837,6 +883,8 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         self._render_status      = "Starting..."
         self._render_frame_idx   = 0
         self._render_frame_paths = []
+        self._render_rgb_paths   = []
+        self._render_rgb_pass    = False
         self._render_node_name   = node_name
 
     def _render_pump_frame(self):
@@ -859,95 +907,181 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         min_d = self._min_depth if self._use_custom_range else None
         max_d = self._max_depth if self._use_custom_range else None
 
-        try:
-            apply_depthmap_colors(
-                node_name=node_name, colormap=cmap, axis=axis,
-                min_depth=min_d, max_depth=max_d,
-                invert=self._invert,
-                current_frame=i, total_frames=total_frames,
-            )
-            # apply_depthmap_colors already calls notify_changed + request_redraw
-            # but we call once more to be certain before render_at
-            scene = lf.get_scene()
-            if scene:
-                scene.notify_changed()
-        except Exception as e:
-            self._render_status = f"ERROR frame {i}: {e}"
-            self._render_active = False
-            _depth_log(f"RENDER PUMP ERROR frame {i}: {e}")
-            return
+        if self._render_rgb_pass:
+            # RGB pass — restore original colours (camera still moves for depth calc)
+            try:
+                self._restore_original_colors(silent=True)
+                scene = lf.get_scene()
+                if scene: scene.notify_changed()
+            except Exception as e:
+                _depth_log(f"RENDER PUMP RGB restore ERROR frame {i}: {e}")
+                self._render_status = f"ERROR rgb frame {i}: {e}"
+                self._render_active = False
+                return
+        else:
+            # Depth pass — apply depthmap colours
+            try:
+                apply_depthmap_colors(
+                    node_name=node_name, colormap=cmap, axis=axis,
+                    min_depth=min_d, max_depth=max_d,
+                    invert=self._invert,
+                    current_frame=i, total_frames=total_frames,
+                )
+                scene = lf.get_scene()
+                if scene: scene.notify_changed()
+            except Exception as e:
+                _depth_log(f"RENDER PUMP ERROR frame {i}: {e}")
+                self._render_status = f"ERROR frame {i}: {e}"
+                self._render_active = False
+                return
 
         # ── 2. Render this frame from the keyframe camera position ────────
         params = _vp_get_view_params()
         if params:
             vp_eye, vp_target, vp_up, fov, vp_w, vp_h = params
 
-            kf_pos, _ = _get_export_camera_pos(i, total_frames)
-            if kf_pos is not None:
-                eye         = tuple(kf_pos.tolist())
-                look_offset = np.array(vp_target) - np.array(vp_eye)
-                target      = tuple((kf_pos + look_offset).tolist())
+            # Get full interpolated transform — eye, target AND up from keyframe
+            transforms = _get_keyframe_transforms()
+            if transforms:
+                m = _interpolate_keyframe_transform(transforms, i, total_frames)
+                if m is not None:
+                    eye, target, up = _camera_state_from_transform(m)
+                    eye    = tuple(eye.tolist())
+                    target = tuple(target.tolist())
+                    up     = tuple(up.tolist())
+                else:
+                    eye, target, up = vp_eye, vp_target, vp_up
             else:
-                eye    = vp_eye
-                target = vp_target
+                eye, target, up = vp_eye, vp_target, vp_up
 
-            try:
-                tensor = lf.render_at(eye, target, vp_w, vp_h, fov, vp_up)
-                if tensor is not None:
-                    arr = tensor.numpy()
-                    arr = _vp_fix_orientation(arr, from_render_at=True)
-                    from PIL import Image as _Image
-                    frame_path = os.path.join(output_dir, f"frame_{i:04d}.png")
-                    _Image.fromarray(
-                        (arr[..., :3] * 255).clip(0, 255).astype(np.uint8)
-                    ).save(frame_path)
+            # Use explicit camera params — _vp_render_at_size uses live viewport
+            arr = _vp_render_at_explicit(eye, target, up, fov, vp_w, vp_h)
+            if arr is not None:
+                        rgb_dir = os.path.join(output_dir, "RGB")
+                        os.makedirs(rgb_dir, exist_ok=True)
+            if arr is not None:
+                from PIL import Image as _Image
+                if self._render_rgb_pass:
+                    sub_dir = os.path.join(output_dir, "RGB")
+                else:
+                    sub_dir = os.path.join(output_dir, "DGS")
+                os.makedirs(sub_dir, exist_ok=True)
+                frame_path = os.path.join(sub_dir, f"frame_{i:04d}.png")
+                _Image.fromarray(
+                    (arr[..., :3] * 255).clip(0, 255).astype(np.uint8)
+                ).save(frame_path)
+                if self._render_rgb_pass:
+                    self._render_rgb_paths.append(frame_path)
+                else:
                     self._render_frame_paths.append(frame_path)
-            except Exception as e:
-                _depth_log(f"RENDER_AT ERROR frame {i}: {e}")
 
         # ── 3. Advance or finish ──────────────────────────────────────────
         self._render_frame_idx  = i + 1
         self._render_progress   = (i + 1) / total_frames
-        self._render_status     = f"Frame {i+1}/{total_frames}"
+        if self._render_rgb_pass:
+            self._render_status = f"RGB frame {i+1}/{total_frames}"
+        else:
+            self._render_status = f"Frame {i+1}/{total_frames}"
 
         if self._render_frame_idx >= total_frames:
-            self._render_active = False
-            self._render_progress = 1.0
-            self._finish_render_video()
+            if self._render_rgb_pass:
+                # Both passes done — encode both videos
+                self._render_active    = False
+                self._render_progress  = 1.0
+                self._render_rgb_pass  = False
+                # Re-apply depthmap so viewport is restored to depth view
+                self._apply_depthmap(silent=True)
+                self._finish_render_video()
+            else:
+                # Depth pass done — start RGB pass
+                self._render_frame_idx  = 0
+                self._render_rgb_paths  = []
+                self._render_rgb_pass   = True
+                self._render_status     = "Starting RGB pass..."
 
     def _finish_render_video(self):
-        """Encode the collected PNGs to mp4 via ffmpeg (background thread ok here
-        — no GPU scene interaction, just filesystem + subprocess)."""
+        """Encode depth + RGB frame sequences to mp4 via PyAV."""
         import threading as _threading
 
-        frame_paths = self._render_frame_paths
+        depth_paths = self._render_frame_paths
+        rgb_paths   = self._render_rgb_paths
         output_dir  = self._render_output_dir
         fps         = self._render_fps
 
-        if not frame_paths:
+        if not depth_paths:
             self._render_status = "No frames rendered"
             return
 
-        def _encode():
+        def _encode_pass(frame_paths, video_path, label):
             try:
-                self._render_status = "Encoding video..."
-                video_path = os.path.join(output_dir, "depth_video.mp4")
-                import shutil
-                ffmpeg = shutil.which("ffmpeg")
-                if ffmpeg:
-                    cmd = [ffmpeg, "-y", "-framerate", str(fps),
-                           "-i", os.path.join(output_dir, "frame_%04d.png"),
-                           "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                           video_path]
-                    result = subprocess.run(cmd, capture_output=True)
-                    if result.returncode == 0:
-                        self._render_status = f"Saved: {video_path}"
-                    else:
-                        self._render_status = f"ffmpeg error: {result.stderr.decode()[:120]}"
-                else:
-                    self._render_status = f"Done ({len(frame_paths)} PNGs — ffmpeg not found)"
+                import av
+                from PIL import Image as _Image
+                first = _Image.open(frame_paths[0]).convert("RGB")
+                w, h  = first.size
+
+                # libx264 DLL fails at runtime on some builds — try in order
+                codecs = ["h264_nvenc", "h264_amf", "h264_qsv",
+                          "libopenh264", "libx264", "mpeg4"]
+                stream    = None
+                container = None
+                used      = None
+                for codec in codecs:
+                    try:
+                        if container:
+                            try: container.close()
+                            except: pass
+                        container = av.open(video_path, mode="w")
+                        stream = container.add_stream(codec, rate=fps)
+                        stream.width   = w
+                        stream.height  = h
+                        stream.pix_fmt = "yuv420p"
+                        if codec not in ("libopenh264", "h264_nvenc",
+                                         "h264_amf", "h264_qsv"):
+                            stream.bit_rate = 8_000_000
+                        # Probe: encode one blank frame
+                        probe = av.VideoFrame(w, h, "yuv420p")
+                        probe.pts = 0
+                        list(stream.encode(probe))
+                        used = codec
+                        _depth_log(f"ENCODE | codec={codec} OK")
+                        break
+                    except Exception as ce:
+                        _depth_log(f"ENCODE | codec={codec} failed: {ce}")
+                        stream = None
+
+                if used is None:
+                    return "ERROR: no working video codec found"
+
+                for idx, path in enumerate(frame_paths):
+                    img   = _Image.open(path).convert("RGB")
+                    frame = av.VideoFrame.from_image(img)
+                    frame.pts = idx + 1  # +1 because probe used 0
+                    for pkt in stream.encode(frame):
+                        container.mux(pkt)
+                    if idx % 10 == 0:
+                        self._render_status = f"Encoding {label} {idx+1}/{len(frame_paths)}..."
+                for pkt in stream.encode():
+                    container.mux(pkt)
+                container.close()
+                return video_path
+            except ImportError:
+                return "ERROR: PyAV not installed"
             except Exception as e:
-                self._render_status = f"ERROR encoding: {e}"
+                return f"ERROR: {e}"
+
+        def _encode():
+            depth_out = os.path.join(output_dir, "depth_video.mp4")
+            rgb_out   = os.path.join(output_dir, "rgb_video.mp4")
+
+            result_d = _encode_pass(depth_paths, depth_out, "Depth")
+            if rgb_paths:
+                result_r = _encode_pass(rgb_paths, rgb_out, "RGB")
+                if "ERROR" in str(result_d) or "ERROR" in str(result_r):
+                    self._render_status = f"{result_d} | {result_r}"
+                else:
+                    self._render_status = f"Done: depth_video.mp4 + rgb_video.mp4"
+            else:
+                self._render_status = f"Saved: {depth_out}" if "ERROR" not in str(result_d) else result_d
 
         _threading.Thread(target=_encode, daemon=True).start()
 
@@ -1105,6 +1239,154 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         self._vp_export_transparency = not self._vp_export_transparency
         self._dirty("vp_transparency")
 
+    def _on_toggle_video_section(self, h, e, a):
+        self._video_expanded = not self._video_expanded
+        self._dirty("video_collapsed", "video_expanded")
+        lf.ui.request_redraw()
+
+    def _on_toggle_export_section(self, h, e, a):
+        self._export_expanded = not self._export_expanded
+        self._dirty("export_collapsed", "export_expanded")
+        lf.ui.request_redraw()
+
+    def _on_run_still_bat(self, h, e, a):
+        try:
+            userprofile = os.environ.get("USERPROFILE", "C:\\Users\\default")
+            rgb_path    = os.path.join(self._render_output_dir, "VIEWPORT_DRGB.png")
+            gsc_path    = os.path.join(self._render_output_dir, "VIEWPORT_DGSC.png")
+            script_path = os.path.join(userprofile, ".lichtfeld", "plugins", "DoF", "python", "Still-DoF_Bokeh.py")
+            activate    = os.path.join(userprofile, "anaconda3", "Scripts", "activate.bat")
+
+            missing = [p for p in (rgb_path, gsc_path) if not os.path.exists(p)]
+            if missing:
+                self._vp_set_status(f"File not found: {os.path.basename(missing[0])} — use Export first", error=True)
+                return
+            if not os.path.exists(script_path):
+                self._vp_set_status(f"Script not found: {script_path}", error=True)
+                return
+
+            # Use conda's python.exe directly — activate doesn't reliably
+            # switch PATH when launched from an embedded host like LichtFeld.
+            import tempfile
+            python_exe = os.path.join(userprofile, "anaconda3", "python.exe")
+            if not os.path.exists(python_exe):
+                self._vp_set_status(f"Anaconda python.exe not found: {python_exe}", error=True)
+                return
+            bat_lines = [
+                "@echo off",
+                f'"{python_exe}" "{script_path}" "{rgb_path}" "{gsc_path}"',
+            ]
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".bat", delete=False, encoding="utf-8"
+            )
+            tmp.write("\r\n".join(bat_lines))
+            tmp.close()
+            subprocess.Popen(["cmd", "/c", tmp.name], shell=False)
+            self._vp_set_status("Launched: Still-DoF_Bokeh.py via Anaconda", success=True)
+        except Exception as e:
+            self._vp_set_status(f"Launch error: {e}", error=True)
+
+    def _on_browse_output(self, h, e, a):
+        # QFileDialog crashes LichtFeld when called off the main thread.
+        # tkinter isn't available in the embedded Python environment.
+        # PowerShell's FolderBrowserDialog runs in its own process — no Qt
+        # thread issues, works from any callback thread.
+        # -Sta is required: FolderBrowserDialog needs a COM STA thread.
+        # -NonInteractive must NOT be set — it suppresses the dialog UI.
+        try:
+            initialdir = self._render_output_dir if os.path.isdir(self._render_output_dir) else "c:\\"
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                f"$d.SelectedPath = '{initialdir}';"
+                "$d.Description = 'Select output folder';"
+                "$d.ShowNewFolderButton = $true;"
+                "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Sta", "-Command", ps_script],
+                capture_output=True, text=True, timeout=120
+            )
+            folder = result.stdout.strip()
+            if folder and os.path.isdir(folder):
+                self._render_output_dir = folder
+                self._dirty("render_output_dir")
+        except Exception as e:
+            self._vp_set_status(f"Browse error: {e}", error=True)
+
+    def _on_open_output(self, h, e, a):
+        try:
+            import subprocess as _sp
+            folder = self._render_output_dir
+            if os.path.isdir(folder):
+                _sp.Popen(["explorer", folder])
+            else:
+                self._vp_set_status(f"Folder not found: {folder}", error=True)
+        except Exception as e:
+            self._vp_set_status(f"Open error: {e}", error=True)
+
+    def _on_open_dof_video(self, h, e, a):
+        """Launch Video-DoF_Bokeh.py with the last rendered video pair."""
+        depth_path = os.path.join(self._render_output_dir, "depth_video.mp4")
+        rgb_path   = os.path.join(self._render_output_dir, "rgb_video.mp4")
+        missing = [p for p in (depth_path, rgb_path) if not os.path.exists(p)]
+        if missing:
+            self._vp_set_status(
+                f"File not found: {os.path.basename(missing[0])}", error=True)
+            return
+        script = str(Path(__file__).parent.parent / "python" / "Video-DoF_Bokeh.py")
+        if not os.path.exists(script):
+            self._vp_set_status("Video-DoF_Bokeh.py not found in python/ folder", error=True)
+            return
+        try:
+            import threading as _t, sys as _sys
+
+            def _launch(dep=depth_path, rgb=rgb_path, scr=script):
+                _sys.argv = [scr, dep, rgb]
+                code = Path(scr).read_text(encoding="utf-8")
+                try:
+                    exec(compile(code, scr, "exec"),
+                         {"__name__": "__main__", "__file__": scr})
+                except SystemExit:
+                    pass
+
+            _t.Thread(target=_launch, daemon=True).start()
+            self._vp_set_status("Opening DoF Video compositor...", success=True)
+        except Exception as e:
+            self._vp_set_status(f"Launch error: {e}", error=True)
+
+    def _on_open_dof_still(self, h, e, a):
+        """Open Still-DoF_Bokeh.py with the last exported PNGs — no re-export."""
+        rgb_path = os.path.join(self._render_output_dir, "VIEWPORT_DRGB.png")
+        gsc_path = os.path.join(self._render_output_dir, "VIEWPORT_DGSC.png")
+        missing = [p for p in (rgb_path, gsc_path) if not os.path.exists(p)]
+        if missing:
+            self._vp_set_status(
+                f"File not found: {os.path.basename(missing[0])} — use Export first", error=True)
+            return
+        script = str(Path(__file__).parent.parent / "python" / "Still-DoF_Bokeh.py")
+        if not os.path.exists(script):
+            self._vp_set_status("Still-DoF_Bokeh.py not found in python/ folder", error=True)
+            return
+        try:
+            import threading as _t, sys as _sys
+
+            def _launch(rgb=rgb_path, gsc=gsc_path, scr=script):
+                _sys.argv = [scr, rgb, gsc]
+                code = Path(scr).read_text(encoding="utf-8")
+                try:
+                    exec(compile(code, scr, "exec"),
+                         {"__name__": "__main__", "__file__": scr})
+                except SystemExit:
+                    pass
+
+            _t.Thread(target=_launch, daemon=True).start()
+            self._vp_set_status(
+                f"Opening DoF Still: {os.path.basename(rgb_path)} + "
+                f"{os.path.basename(gsc_path)}", success=True)
+        except Exception as e:
+            self._vp_set_status(f"Launch error: {e}", error=True)
+
     def _on_open_dof(self, h, e, a):
         """Launch the DoF compositor with the last written file pair."""
         rgb_path = os.path.join(self._render_output_dir, "VIEWPORT_DRGB.png")
@@ -1135,10 +1417,10 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             self._vp_set_status(f"Launch error: {e}", error=True)
 
     def _on_vp_export(self, h, e, a):
-        """Dual-capture export for Still-DoF_Bokeh.py:
+        """Dual-capture export — saves two PNGs for Still-DoF_Bokeh.py:
         1. Restore original colours  → capture → VIEWPORT_DRGB.png  (colour, depth OFF)
         2. Re-apply depthmap         → capture → VIEWPORT_DGSC.png  (greyscale depth, depth ON)
-        3. Launch Still-DoF_Bokeh.py with both files pre-loaded.
+        Use "Open DoF Still" button to launch the compositor with these files.
         All GPU state changes are sequenced through the draw handler so each
         capture sees the correct fully-rendered frame."""
         node_name = self._get_selected_splat_name()
@@ -1229,25 +1511,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
                 if not saved_ok:
                     return
-
-                # Launch in a thread — exec() runs app.exec() which blocks.
-                try:
-                    import threading as _t, sys as _sys
-
-                    def _launch(rgb=rgb_path, gsc=gsc_path, scr=script):
-                        import time as _time
-                        _time.sleep(0.5)
-                        _sys.argv = [scr, rgb, gsc]
-                        code = Path(scr).read_text(encoding="utf-8")
-                        try:
-                            exec(compile(code, scr, "exec"),
-                                 {"__name__": "__main__", "__file__": scr})
-                        except SystemExit:
-                            pass
-
-                    _t.Thread(target=_launch, daemon=True).start()
-                except Exception as e:
-                    self._vp_set_status(f"Launch error: {e}", error=True)
+                # Files saved — user clicks "Open DoF Still" to launch compositor.
 
         lf.add_draw_handler("depthmap.dof_seq", _seq)
         self._vp_set_status("Capturing...", warning=True)
