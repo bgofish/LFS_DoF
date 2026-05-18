@@ -56,7 +56,7 @@ class DEPTHMAP_OT_pick_point(Operator):
     """Modal operator for picking a point on the gaussian splat model."""
 
     # Full dotted ID required by the host: package.module.ClassName
-    id          = "lfs_plugins.depthmap_viz.operators.point_picker.DEPTHMAP_OT_pick_point"
+    id          = "lfs_plugins.DoF.operators.point_picker.DEPTHMAP_OT_pick_point"
     label       = "Pick Depth Point"
     description = "Click on the model to pick a point for depth range"
     options     = {'BLOCKING'}
