@@ -18,25 +18,13 @@ In LichtFeld Studio:
 1. Requires an active 3dGSplat at the position you want to export an image
 2. Open the "DoF" panel in the side panel.
 3. Pick Cam-O preset - Grayscale colormap (Jet, Turbo, Viridis have been retained for better visual identification of features ) and camera axis radial (P or parallel is also available).
-4. If needed set custom depth range using one of two methods:
+4. If needed set custom depth range:
 
-### Method 1: Click to Pick (Default)
+Click to Pick 
 - Click "Pick Point 1" or "Pick Point 2", then click directly on the model to set min/max depth values.
 - You can click multiple times to adjust the point - each click updates the depth value.
 - Click the "Stop Picking" button or press ESC to exit picking mode.
-
-### Method 2: Selection-Based (Old Method)
-Useful when XYZ picking coordinates are unreliable:
-1. Check "Use Selection Method (old)" in the Depth Range section.
-2. Use the Splat Select tool to select gaussians at your desired min depth location.
-3. Click "Set Point 1 from Selection".
-4. Select gaussians at your desired max depth location.
-5. Click "Set Point 2 from Selection".
-
-4. Fine-tune the depth values with the +/- buttons or input fields.
-5. Enable "Live Preview" to see changes in real-time.
-6. Use "Restore Original" to revert to original colors.
-
+- Alternative Method using selection-based picking is also available
 ---
 
 ### Render Depth Video (WIP)
@@ -46,6 +34,8 @@ Renders a depth-map video along an existing keyframe camera path:
 - Click **Render Depth Video** — each frame applies the depth map at the correct interpolated camera position before rendering
 - Output saved as `frame_NNNN.png` + `depth_video.mp4` (requires `ffmpeg` on PATH) - To be fixed
 - need to have manual load of the python /python/Depth_Blur7.py  (temp only need fixing)
+
+---
 
 ###  Export Viewport PNG — DoF Compositor
 
@@ -57,6 +47,8 @@ Click **Export Viewport PNG** to:
 4. Launches **Still-DoF_Bokeh** with both images pre-loaded, ready to apply depth-of-field bokeh. Currently this can only be automtically opened once per LFS session.
 
 Resolution options: **Viewport**, **1080p**, **1440p**, **4K**, **8K**  
+
+---
 
 ## Usage Information
 
