@@ -3,12 +3,12 @@
 
 [project]
 name = "DoF"
-version = "0.1.1"
+version = "0.2.0"
 description = "Depth of Field visualization using Grayscale depthmaps for Gaussian Splats"
 author = "Brian Davis (bb6)"
 
 dependencies = [
-    "opencv-python", "numpy", "PySide6" 
+    "opencv-python", "numpy", "PySide6", "av"
 ]
 
 [tool.lichtfeld]
