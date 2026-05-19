@@ -28,24 +28,30 @@ Click to Pick
 
 ---
 
-### Render Depth Video (WIP)
+### Render Depth Video (Draft)
 Renders a depth-map video along an existing keyframe camera path:
 
 - Set **Output** folder, **Frames**, and **FPS**
 - Click **Render Depth Video** — each frame applies the depth map at the correct interpolated camera position before rendering
-- Output saved as `frame_NNNN.png` + `depth_video.mp4` (requires `ffmpeg` on PATH) - To be fixed
-- need to have manual load of the python /python/Depth_Blur7.py  (temp only need fixing)
+- PNG frame outputs saved to two sub-folders `\DGS` (greyscales) & `\RGB` (Full colour) and `rgb_video.mp4` + `depth_video.mp4` are saved to the set output folder 
+- [Open DoF Video] - Launches **Video-DoF_Bokeh** with both videos pre-loaded, ready to apply depth-of-field bokeh. Currently this can only be automtically opened once per LFS session.
+- IN DEVELOPMANT:  for further 'launches' are requred within one session then the python script can be opened: 
 
 ---
 
 ###  Export Viewport PNG — DoF Compositor
 
-Click **Export Viewport PNG** to:
+Click **Export**  to render Viewport PNG** :
 
-1. Capture the viewport **with depth map OFF** → saves `VIEWPORT_DRGB.png` (colour image)
-2. Capture the viewport **with depth map ON** → saves `VIEWPORT_DGSC.png` (greyscale depth)
+1. Captures the viewport **with depth map OFF** → saves `VIEWPORT_DRGB.png` (colour image)
+2. Captures the viewport **with depth map ON** → saves `VIEWPORT_DGSC.png` (greyscale depth)
 3. Both files saved to the configured Output folder (`c:\temp` by default)
-4. Launches **Still-DoF_Bokeh** with both images pre-loaded, ready to apply depth-of-field bokeh. Currently this can only be automtically opened once per LFS session.
+
+Click **[Open DoF Still]**  
+
+Launches **Still-DoF_Bokeh** with both images pre-loaded, ready to apply depth-of-field bokeh. Currently this can only be automtically opened once per LFS session.
+
+- If further 'launches' are requred within one session then the python script can be opened using [Run External Still Editor].  I use anaconda so this has been set as the default (but it may require the manual install of the required packages).
 
 Resolution options: **Viewport**, **1080p**, **1440p**, **4K**, **8K**  
 
