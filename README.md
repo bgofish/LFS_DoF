@@ -11,6 +11,7 @@ IMPORTANT - KNOWN ISSUES:
 
 1) when attempting to start the [Open DoF Video] editor for videos the two files are failing to autoload - so for now use [Run External Video Editor] and maually drag'n'drop the respective files in.
 
+2) Alpha transparency is not working at all  Might hide the button for now  :)
 
 
 ## Installation (LichtFeld Studio v0.5+)
