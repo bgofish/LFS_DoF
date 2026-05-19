@@ -196,7 +196,7 @@ def _vp_bw2a(black_arr, white_arr):
 
 # ── Depth log ─────────────────────────────────────────────────────────────────
 
-DEPTH_LOG_PATH = r"u:\temp\DEPTH.TXT"
+DEPTH_LOG_PATH = r"c:\temp\DEPTH.TXT"
 
 def _depth_log(msg: str):
     try:
