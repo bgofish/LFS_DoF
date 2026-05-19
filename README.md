@@ -118,4 +118,5 @@ One-click combinations of colourmap + axis:
 
 ## Author
 Brian Davis (bb6) — 2026  with code for picking and depth display from Jacob van  Beets
+
 License: GPL-3.0-or-later
