@@ -4,7 +4,7 @@ A plugin that creates a greyscale depth map for Gaussian Splats to allow render 
 that allows adjustment of focal plane , depth of field and bokeh shape all in realtime.
 
 <img width="2559" height="1536" alt="image" src="https://github.com/user-attachments/assets/4a365495-bed3-4ec9-99fd-c1fe78b592a2" />
-3dGS thanks to dok11  - SuperSplat LINK (https://superspl.at/scene/67ba224d ) 
+3dGS thanks to dok11  - SuperSplat LINK (https://superspl.at/scene/67ba224d )   & ASZ20 for the idea in the first place.
 
 ## Installation (LichtFeld Studio v0.5+)
 
