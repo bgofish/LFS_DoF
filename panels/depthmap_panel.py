@@ -53,6 +53,14 @@ VIDEO_QUALITIES = [
     ("Low",       36, 48,  10_000_000),
 ]
 
+VIDEO_FORMAT_DESCS = [
+    "Widest compatibility",
+    "Flexible container, any codec",
+    "Apple / DaVinci Resolve",
+    "Legacy universal format",
+    "Web streaming, VP9 codec",
+]
+
 def _vp_get_view_params():
     view = lf.get_current_view()
     if view is None:
@@ -1039,12 +1047,13 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
         if self._render_frame_idx >= total_frames:
             if self._render_rgb_pass:
-                # Both passes done — encode both videos
+                # RGB pass complete
                 self._render_active    = False
                 self._render_progress  = 1.0
                 self._render_rgb_pass  = False
-                # Re-apply depthmap so viewport is restored to depth view
-                self._apply_depthmap(silent=True)
+                if not self._render_rgb_only:
+                    # Full render: restore depth view in viewport
+                    self._apply_depthmap(silent=True)
                 self._finish_render_video()
             else:
                 # Depth pass done — start RGB pass
@@ -1064,7 +1073,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         fmt_label, fmt_container, fmt_ext, fmt_codecs = VIDEO_FORMATS[self._video_format]
         q_label, q_crf_h264, q_crf_vp9, q_bitrate    = VIDEO_QUALITIES[self._video_quality]
 
-        if not depth_paths:
+        if not depth_paths and not rgb_paths:
             self._render_status = "No frames rendered"
             return
 
@@ -1089,18 +1098,14 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                         stream = container.add_stream(codec, rate=fps)
                         stream.width  = w
                         stream.height = h
-
-                        # Pixel format: vp9 prefers yuv420p too; keep consistent
                         stream.pix_fmt = "yuv420p"
-
-                        # Use explicit bitrate for all encoders so quality
-                        # levels map directly to the Mbps values the user chose.
                         stream.bit_rate = q_bitrate
-
-                        # Probe: encode one blank frame to confirm codec works
-                        probe = av.VideoFrame(w, h, "yuv420p")
-                        probe.pts = 0
-                        list(stream.encode(probe))
+                        # Test codec by encoding the actual first frame —
+                        # no blank probe frame so no green screen at start.
+                        img0  = _Image.open(frame_paths[0]).convert("RGB")
+                        frm0  = av.VideoFrame.from_image(img0)
+                        frm0.pts = 0
+                        list(stream.encode(frm0))
                         used = codec
                         _depth_log(f"ENCODE | codec={codec} quality={q_label} format={fmt_label} OK")
                         break
@@ -1114,7 +1119,9 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                 for idx, path in enumerate(frame_paths):
                     img   = _Image.open(path).convert("RGB")
                     frame = av.VideoFrame.from_image(img)
-                    frame.pts = idx + 1  # +1 because probe used 0
+                    frame.pts = idx
+                    if idx == 0:
+                        continue   # already encoded above during codec probe
                     for pkt in stream.encode(frame):
                         container.mux(pkt)
                     if idx % 10 == 0:
