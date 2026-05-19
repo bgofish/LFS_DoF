@@ -6,6 +6,13 @@ that allows adjustment of focal plane , depth of field and bokeh shape all in re
 <img width="2559" height="1536" alt="image" src="https://github.com/user-attachments/assets/4a365495-bed3-4ec9-99fd-c1fe78b592a2" />
 3dGS thanks to dok11  - SuperSplat LINK (https://superspl.at/scene/67ba224d )   & ASZ20 for the idea in the first place.
 
+
+IMPORTANT - KNOWN ISSUES:
+
+1) when attempting to start the [Open DoF Video] editor for videos the two files are failing to autoload - so for now use [Run External Video Editor] and maually drag'n'drop the respective files in.
+
+
+
 ## Installation (LichtFeld Studio v0.5+)
 
 In LichtFeld Studio:
