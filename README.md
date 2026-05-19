@@ -38,7 +38,7 @@ Renders a depth-map video along an existing keyframe camera path:
 - IN DEVELOPMENT:  for further 'launches' are requred within one session then the python script can be opened.
 
 - IN DEVELOPMENT:  for standard RBG Video (no depth information this tool can be used for highly customised output: MP4/MKV/MOV/AVI/WebM and any resolution,
-  5 differnt compression levels & custom duration / FPS
+  4 differnt compression levels (10,20,50,100Mbps) & custom duration / FPS
 
 <img width="500" height="380" alt="image" src="https://github.com/user-attachments/assets/33b2bc0f-95ca-4aca-a80a-afdd020c431f" />
 
