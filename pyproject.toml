@@ -3,7 +3,7 @@
 
 [project]
 name = "DoF"
-version = "0.2.0"
+version = "0.2.1"
 description = "Depth of Field visualization using Grayscale depthmaps for Gaussian Splats"
 author = "Brian Davis (bb6)"
 
