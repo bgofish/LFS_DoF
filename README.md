@@ -28,14 +28,19 @@ Click to Pick
 
 ---
 
-### Render Depth Video (Draft)
+### Render Depth Video 
 Renders a depth-map video along an existing keyframe camera path:
 
 - Set **Output** folder, **Frames**, and **FPS**
 - Click **Render Depth Video** — each frame applies the depth map at the correct interpolated camera position before rendering
 - PNG frame outputs saved to two sub-folders `\DGS` (greyscales) & `\RGB` (Full colour) and `rgb_video.mp4` + `depth_video.mp4` are saved to the set output folder 
 - [Open DoF Video] - Launches **Video-DoF_Bokeh** with both videos pre-loaded, ready to apply depth-of-field bokeh. Currently this can only be automtically opened once per LFS session.
-- IN DEVELOPMANT:  for further 'launches' are requred within one session then the python script can be opened: 
+- IN DEVELOPMENT:  for further 'launches' are requred within one session then the python script can be opened.
+
+- IN DEVELOPMENT:  for standard RBG Video (no depth information this tool can be used for highly customised output: MP4/MKV/MOV/AVI/WebM and any resolution,
+  5 differnt compression levels & custom duration / FPS
+
+<img width="500" height="380" alt="image" src="https://github.com/user-attachments/assets/33b2bc0f-95ca-4aca-a80a-afdd020c431f" />
 
 ---
 
