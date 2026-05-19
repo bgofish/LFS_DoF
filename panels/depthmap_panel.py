@@ -33,6 +33,26 @@ VP_RESOLUTIONS = [
     ("8K",        4320),
 ]
 
+# (label, container_format, extension, codec_priority_list)
+# codec_priority_list: tried in order until one works in the current PyAV build
+VIDEO_FORMATS = [
+    ("MP4",  "mp4",  ".mp4", ["h264_nvenc", "h264_amf", "h264_qsv", "libopenh264", "libx264", "mpeg4"]),
+    ("MKV",  "matroska", ".mkv", ["h264_nvenc", "h264_amf", "h264_qsv", "libopenh264", "libx264", "mpeg4"]),
+    ("MOV",  "mov",  ".mov", ["h264_nvenc", "h264_amf", "h264_qsv", "libopenh264", "libx264", "mpeg4"]),
+    ("AVI",  "avi",  ".avi", ["h264_nvenc", "h264_amf", "h264_qsv", "libx264", "mpeg4", "msmpeg4"]),
+    ("WebM", "webm", ".webm", ["libvpx-vp9", "libvpx"]),
+]
+
+# (label, crf_h264, crf_vp9, bitrate_bps)
+# Bitrate is used for all encoders (HW and SW); CRF kept as fallback hint
+# for libx264/libvpx when bitrate-mode isn't supported.
+VIDEO_QUALITIES = [
+    ("Very High", 16, 24, 100_000_000),
+    ("High",      22, 31,  50_000_000),
+    ("Medium",    28, 38,  20_000_000),
+    ("Low",       36, 48,  10_000_000),
+]
+
 def _vp_get_view_params():
     view = lf.get_current_view()
     if view is None:
@@ -321,6 +341,11 @@ class DepthmapPanel(lf.ui.Panel):
         self._render_output_dir   = "c:\\temp"
         self._render_total_frames = 300
         self._render_fps          = 30
+        self._video_use_custom_res = False
+        self._video_quality        = 1        # 0=Very High  1=High  2=Medium  3=Low
+        self._video_format         = 0        # index into VIDEO_FORMATS
+        self._video_custom_w      = 1920
+        self._video_custom_h      = 1080
         self._render_active       = False
         self._render_cancel       = False
         self._render_progress     = 0.0
@@ -330,6 +355,7 @@ class DepthmapPanel(lf.ui.Panel):
         self._render_frame_paths  = []
         self._render_node_name    = ""
         self._render_rgb_pass     = False  # True when doing the RGB second pass
+        self._render_rgb_only     = False  # True when skipping depth pass entirely
         self._render_rgb_paths    = []
 
         # Viewport export
@@ -455,6 +481,24 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind("render_fps_str",
                    lambda: str(self._render_fps),
                    self._on_set_render_fps)
+        model.bind("video_custom_w_str",
+                   lambda: str(self._video_custom_w),
+                   self._on_set_video_custom_w)
+        model.bind("video_custom_h_str",
+                   lambda: str(self._video_custom_h),
+                   self._on_set_video_custom_h)
+        model.bind_func("video_res_viewport",    lambda: not self._video_use_custom_res)
+        model.bind_func("video_res_custom",      lambda: self._video_use_custom_res)
+        model.bind_func("video_res_report",      self._video_res_report)
+        model.bind_event("set_video_res_viewport", self._on_set_video_res_viewport)
+        model.bind_event("set_video_res_custom",   self._on_set_video_res_custom)
+        # Video quality + format
+        model.bind_func("video_quality_label", lambda: VIDEO_QUALITIES[self._video_quality][0])
+        model.bind_func("video_quality_mbps",  lambda: f"{VIDEO_QUALITIES[self._video_quality][3] // 1_000_000} Mbps")
+        model.bind_func("video_format_label",  lambda: VIDEO_FORMATS[self._video_format][0])
+        model.bind_func("video_format_desc",   lambda: VIDEO_FORMAT_DESCS[self._video_format])
+        model.bind_event("cycle_video_quality", self._on_cycle_video_quality)
+        model.bind_event("cycle_video_format",  self._on_cycle_video_format)
         model.bind_func("render_duration_str", lambda: f"{self._render_total_frames / max(self._render_fps,1):.1f}s  ({self._render_total_frames} frames @ {self._render_fps}fps)")
         model.bind_func("render_active",       lambda: self._render_active)
         model.bind_func("render_idle",         lambda: not self._render_active)
@@ -463,7 +507,9 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind_func("render_status",       lambda: self._render_status)
         model.bind_func("render_status_ok",    lambda: bool(self._render_status) and "ERROR" not in self._render_status)
         model.bind_func("render_status_err",   lambda: "ERROR" in self._render_status)
-        model.bind_event("do_render_video",    self._on_render_video)
+        model.bind_event("do_render_video",         self._on_render_video)
+        model.bind_event("do_render_rgb_only",      self._on_render_rgb_only_video)
+        model.bind_event("run_video_bat",           self._on_run_video_bat)
         model.bind_event("cancel_render",      self._on_cancel_render)
 
         # ── Export PNG ────────────────────────────────────────────────────
@@ -880,12 +926,18 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         self._render_active      = True
         self._render_cancel      = False
         self._render_progress    = 0.0
-        self._render_status      = "Starting..."
         self._render_frame_idx   = 0
         self._render_frame_paths = []
         self._render_rgb_paths   = []
-        self._render_rgb_pass    = False
         self._render_node_name   = node_name
+
+        if self._render_rgb_only:
+            # Skip depth pass — start directly on the RGB pass
+            self._render_rgb_pass = True
+            self._render_status   = "Starting RGB pass..."
+        else:
+            self._render_rgb_pass = False
+            self._render_status   = "Starting..." 
 
     def _render_pump_frame(self):
         """Called by on_update() once per tick while a render is active.
@@ -955,6 +1007,8 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                 eye, target, up = vp_eye, vp_target, vp_up
 
             # Use explicit camera params — _vp_render_at_size uses live viewport
+            if self._video_use_custom_res:
+                vp_w, vp_h = self._video_custom_w, self._video_custom_h
             arr = _vp_render_at_explicit(eye, target, up, fov, vp_w, vp_h)
             if arr is not None:
                         rgb_dir = os.path.join(output_dir, "RGB")
@@ -1000,57 +1054,62 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                 self._render_status     = "Starting RGB pass..."
 
     def _finish_render_video(self):
-        """Encode depth + RGB frame sequences to mp4 via PyAV."""
+        """Encode depth + RGB frame sequences to video via PyAV."""
         import threading as _threading
 
         depth_paths = self._render_frame_paths
         rgb_paths   = self._render_rgb_paths
         output_dir  = self._render_output_dir
         fps         = self._render_fps
+        fmt_label, fmt_container, fmt_ext, fmt_codecs = VIDEO_FORMATS[self._video_format]
+        q_label, q_crf_h264, q_crf_vp9, q_bitrate    = VIDEO_QUALITIES[self._video_quality]
 
         if not depth_paths:
             self._render_status = "No frames rendered"
             return
 
-        def _encode_pass(frame_paths, video_path, label):
+        def _encode_pass(frame_paths, stem, label):
+            video_path = os.path.join(output_dir, f"{stem}{fmt_ext}")
             try:
                 import av
                 from PIL import Image as _Image
                 first = _Image.open(frame_paths[0]).convert("RGB")
                 w, h  = first.size
 
-                # libx264 DLL fails at runtime on some builds — try in order
-                codecs = ["h264_nvenc", "h264_amf", "h264_qsv",
-                          "libopenh264", "libx264", "mpeg4"]
                 stream    = None
                 container = None
                 used      = None
-                for codec in codecs:
+
+                for codec in fmt_codecs:
                     try:
                         if container:
                             try: container.close()
                             except: pass
-                        container = av.open(video_path, mode="w")
+                        container = av.open(video_path, mode="w", format=fmt_container)
                         stream = container.add_stream(codec, rate=fps)
-                        stream.width   = w
-                        stream.height  = h
+                        stream.width  = w
+                        stream.height = h
+
+                        # Pixel format: vp9 prefers yuv420p too; keep consistent
                         stream.pix_fmt = "yuv420p"
-                        if codec not in ("libopenh264", "h264_nvenc",
-                                         "h264_amf", "h264_qsv"):
-                            stream.bit_rate = 8_000_000
-                        # Probe: encode one blank frame
+
+                        # Use explicit bitrate for all encoders so quality
+                        # levels map directly to the Mbps values the user chose.
+                        stream.bit_rate = q_bitrate
+
+                        # Probe: encode one blank frame to confirm codec works
                         probe = av.VideoFrame(w, h, "yuv420p")
                         probe.pts = 0
                         list(stream.encode(probe))
                         used = codec
-                        _depth_log(f"ENCODE | codec={codec} OK")
+                        _depth_log(f"ENCODE | codec={codec} quality={q_label} format={fmt_label} OK")
                         break
                     except Exception as ce:
                         _depth_log(f"ENCODE | codec={codec} failed: {ce}")
                         stream = None
 
                 if used is None:
-                    return "ERROR: no working video codec found"
+                    return f"ERROR: no working codec for {fmt_label}"
 
                 for idx, path in enumerate(frame_paths):
                     img   = _Image.open(path).convert("RGB")
@@ -1069,19 +1128,25 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             except Exception as e:
                 return f"ERROR: {e}"
 
-        def _encode():
-            depth_out = os.path.join(output_dir, "depth_video.mp4")
-            rgb_out   = os.path.join(output_dir, "rgb_video.mp4")
+        rgb_only = self._render_rgb_only
 
-            result_d = _encode_pass(depth_paths, depth_out, "Depth")
-            if rgb_paths:
-                result_r = _encode_pass(rgb_paths, rgb_out, "RGB")
-                if "ERROR" in str(result_d) or "ERROR" in str(result_r):
-                    self._render_status = f"{result_d} | {result_r}"
-                else:
-                    self._render_status = f"Done: depth_video.mp4 + rgb_video.mp4"
+        def _encode():
+            if rgb_only:
+                result_r = _encode_pass(rgb_paths, "rgb_video", "RGB")
+                self._render_status = (f"Saved: rgb_video{fmt_ext}  [{q_label}]"
+                                       if "ERROR" not in str(result_r) else result_r)
             else:
-                self._render_status = f"Saved: {depth_out}" if "ERROR" not in str(result_d) else result_d
+                result_d = _encode_pass(depth_paths, "depth_video", "Depth")
+                if rgb_paths:
+                    result_r = _encode_pass(rgb_paths, "rgb_video", "RGB")
+                    if "ERROR" in str(result_d) or "ERROR" in str(result_r):
+                        self._render_status = f"{result_d} | {result_r}"
+                    else:
+                        self._render_status = (f"Done: depth_video{fmt_ext} + "
+                                               f"rgb_video{fmt_ext}  [{q_label}]")
+                else:
+                    self._render_status = (f"Saved: depth_video{fmt_ext}  [{q_label}]"
+                                           if "ERROR" not in str(result_d) else result_d)
 
         _threading.Thread(target=_encode, daemon=True).start()
 
@@ -1200,6 +1265,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             self._render_status = "ERROR: Select a splat first"
             self._dirty("render_status", "render_status_err")
             return
+        self._render_rgb_only = False
         self._render_depth_video(
             self._render_output_dir,
             self._render_total_frames,
@@ -1207,8 +1273,96 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         )
         self._dirty("render_active", "render_idle")
 
+    def _on_render_rgb_only_video(self, h, e, a):
+        node_name = self._get_selected_splat_name()
+        if not node_name:
+            self._render_status = "ERROR: Select a splat first"
+            self._dirty("render_status", "render_status_err")
+            return
+        self._render_rgb_only = True
+        self._render_depth_video(
+            self._render_output_dir,
+            self._render_total_frames,
+            self._render_fps,
+        )
+        self._dirty("render_active", "render_idle")
+
+    def _on_run_video_bat(self, h, e, a):
+        try:
+            userprofile = os.environ.get("USERPROFILE", "C:\\Users\\default")
+            fmt_ext     = VIDEO_FORMATS[self._video_format][2]
+            depth_path  = os.path.join(self._render_output_dir, f"depth_video{fmt_ext}")
+            rgb_path    = os.path.join(self._render_output_dir, f"rgb_video{fmt_ext}")
+            python_exe  = os.path.join(userprofile, "anaconda3", "python.exe")
+            script_path = os.path.join(userprofile, ".lichtfeld", "plugins", "DoF", "python", "Video-DoF_Bokeh.py")
+
+            missing = [p for p in (depth_path, rgb_path) if not os.path.exists(p)]
+            if missing:
+                self._vp_set_status(f"File not found: {os.path.basename(missing[0])} — render first", error=True)
+                return
+            if not os.path.exists(python_exe):
+                self._vp_set_status(f"Anaconda python.exe not found: {python_exe}", error=True)
+                return
+            if not os.path.exists(script_path):
+                self._vp_set_status(f"Video-DoF_Bokeh.py not found: {script_path}", error=True)
+                return
+
+            import tempfile
+            bat_lines = [
+                "@echo off",
+                f'"{python_exe}" "{script_path}" "{depth_path}" "{rgb_path}"',
+            ]
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".bat", delete=False, encoding="utf-8"
+            )
+            tmp.write("\r\n".join(bat_lines))
+            tmp.close()
+            subprocess.Popen(["cmd", "/c", tmp.name], shell=False)
+            self._vp_set_status("Launched: Video-DoF_Bokeh.py via Anaconda", success=True)
+        except Exception as e:
+            self._vp_set_status(f"Launch error: {e}", error=True)
+
     def _on_cancel_render(self, h, e, a):
         self._render_cancel = True
+
+    def _on_cycle_video_quality(self, h, e, a):
+        self._video_quality = (self._video_quality + 1) % len(VIDEO_QUALITIES)
+        self._dirty("video_quality_label", "video_quality_mbps")
+
+    def _on_cycle_video_format(self, h, e, a):
+        self._video_format = (self._video_format + 1) % len(VIDEO_FORMATS)
+        self._dirty("video_format_label", "video_format_desc")
+
+    def _on_set_video_custom_w(self, v):
+        try:
+            self._video_custom_w = max(2, int(v) & ~1)   # ensure even
+        except ValueError:
+            pass
+
+    def _on_set_video_custom_h(self, v):
+        try:
+            self._video_custom_h = max(2, int(v) & ~1)   # ensure even
+        except ValueError:
+            pass
+
+    def _on_set_video_res_viewport(self, h, e, a):
+        self._video_use_custom_res = False
+        self._video_quality        = 1        # 0=Very High  1=High  2=Medium  3=Low
+        self._video_format         = 0        # index into VIDEO_FORMATS
+        self._dirty("video_res_viewport", "video_res_custom", "video_res_report")
+
+    def _on_set_video_res_custom(self, h, e, a):
+        self._video_use_custom_res = True
+        self._dirty("video_res_viewport", "video_res_custom", "video_res_report")
+
+    def _video_res_report(self):
+        if self._video_use_custom_res:
+            return f"Custom: {self._video_custom_w} × {self._video_custom_h} px"
+        params = _vp_get_view_params()
+        if params:
+            _, _, _, _, vp_w, vp_h = params
+            return f"Viewport: {vp_w} × {vp_h} px"
+        return "Viewport resolution"
 
     def _on_set_render_frames(self, v):
         try:

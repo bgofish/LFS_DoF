@@ -212,6 +212,50 @@
                 title="Collapse video render section.">▼ Render Depth Video</button>
       </div>
 
+      <!-- ── Video resolution picker ──────────────────────────── -->
+      <div class="btn-row">
+        <button data-event-click="set_video_res_viewport"
+                data-if="video_res_viewport"
+                class="btn btn-active"
+                title="Render at current viewport resolution.">Viewport</button>
+        <button data-event-click="set_video_res_viewport"
+                data-if="video_res_custom"
+                class="btn"
+                title="Render at current viewport resolution.">Viewport</button>
+        <button data-event-click="set_video_res_custom"
+                data-if="video_res_custom"
+                class="btn btn-active"
+                title="Render at custom width × height.">Custom Res</button>
+        <button data-event-click="set_video_res_custom"
+                data-if="video_res_viewport"
+                class="btn"
+                title="Render at custom width × height.">Custom Res</button>
+      </div>
+      <div data-if="video_res_custom" class="setting-row">
+        <span class="prop-label">W</span>
+        <input type="text" class="number-input fixed-input" data-value="video_custom_w_str" />
+        <span class="prop-label" style="margin-left:8dp;">H</span>
+        <input type="text" class="number-input fixed-input" data-value="video_custom_h_str" />
+      </div>
+      <span class="text-dim">{{video_res_report}}</span>
+
+      <!-- ── Quality ───────────────────────────────────────────── -->
+      <div class="setting-row" style="margin-top:4dp;">
+        <span class="prop-label">Quality</span>
+        <button class="btn" data-event-click="cycle_video_quality"
+                title="Click to cycle: Very High (100Mbps) → High (50Mbps) → Medium (20Mbps) → Low (10Mbps).">{{video_quality_label}}</button>
+        <span class="text-dim" style="margin-left:6dp;">{{video_quality_mbps}}</span>
+      </div>
+
+      <!-- ── Format ────────────────────────────────────────────── -->
+      <div class="setting-row">
+        <span class="prop-label">Format</span>
+        <button class="btn" data-event-click="cycle_video_format"
+                title="Click to cycle: MP4 → MKV → MOV → AVI → WebM.">{{video_format_label}}</button>
+        <span class="text-dim" style="margin-left:6dp;">{{video_format_desc}}</span>
+      </div>
+
+            <!-- ── Frames / FPS ──────────────────────────────────────── -->
       <div class="setting-row">
         <span class="prop-label">Frames</span>
         <input type="text" class="number-input fixed-input" data-value="render_frames_str" />
@@ -234,6 +278,12 @@
                   title="Render depth + RGB frames and encode to video.">Render Depth Video</button>
           <button class="btn" data-event-click="open_dof_video"
                   title="Open DoF video compositor with last rendered videos.">Open DoF Video</button>
+          <button class="btn" data-event-click="do_render_rgb_only"
+                  title="Render RGB frames only — no greyscale depth video.">RGB Video Save</button>
+        </div>
+        <div class="btn-row">
+          <button class="btn" data-event-click="run_video_bat"
+                  title="Launch Video-DoF_Bokeh.py via Anaconda with the last rendered depth + RGB videos.">Run External Video Editor</button>
         </div>
         <div data-if="render_status_ok"><span class="text-ok">{{render_status}}</span></div>
         <div data-if="render_status_err"><span class="text-err">{{render_status}}</span></div>
