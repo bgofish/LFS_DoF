@@ -17,8 +17,8 @@ In LichtFeld Studio:
 ## Usage
 1. Requires an active 3dGSplat at the position you want to export an image
 2. Open the "DoF" panel in the side panel.
-3. Pick Cam-O preset - Grayscale colormap (Jet, Turbo, Viridis have been retained for better visual identification of features ) and camera axis radial (P or parallel is also available).
-4. If needed set custom depth range:
+3. Pick [Cam-O] preset - Grayscale colormap (Jet, Turbo, Viridis have been retained for better visual identification of features ) and camera axis radial (P or parallel is also available).
+4. If needed set a custom depth range:
 
 Click to Pick 
 - Click "Pick Point 1" or "Pick Point 2", then click directly on the model to set min/max depth values.
