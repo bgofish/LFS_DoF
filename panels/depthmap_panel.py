@@ -61,6 +61,68 @@ VIDEO_FORMAT_DESCS = [
     "Web streaming, VP9 codec",
 ]
 
+def _equirect_composite(ra, hdr, eye, target, up_vec_in, fov_deg, exposure=0.0):
+    """Composite HDR equirectangular onto render_at output.
+    ra         : [H, W, 3] float32  — render_at output (black where no splat)
+    hdr        : [Hm, Wm, 3] float32 — equirectangular image
+    eye/target : camera position and look-at point for this specific frame
+    up_vec_in  : up vector tuple for this frame
+    Returns [H, W, 3] float32 composited image.
+    """
+    h, w   = ra.shape[:2]
+    hm, wm = hdr.shape[:2]
+
+    # Derive camera basis from eye/target/up — correct per-frame, not live viewport
+    fwd   = np.array(target) - np.array(eye)
+    fwd   = fwd / np.linalg.norm(fwd)
+    up    = np.array(up_vec_in, dtype=np.float32)
+    right = np.cross(fwd, up);  right = right / np.linalg.norm(right)
+    up    = np.cross(right, fwd)  # reorthogonalise
+
+    # Per-pixel ray directions
+    fov_rad = np.radians(fov_deg)
+    tan_h   = np.tan(fov_rad / 2)
+    tan_w   = tan_h * (w / h)
+    ys = np.linspace( tan_h, -tan_h, h)
+    xs = np.linspace(-tan_w,  tan_w, w)
+    xs, ys = np.meshgrid(xs, ys)
+
+    ray_world = (xs[..., np.newaxis] * right +
+                 ys[..., np.newaxis] * up +
+                 np.ones_like(xs)[..., np.newaxis] * fwd)
+    ray_norm  = ray_world / np.linalg.norm(ray_world, axis=-1, keepdims=True)
+
+    # Equirect UV
+    rx, ry, rz = ray_norm[...,0], ray_norm[...,1], ray_norm[...,2]
+    u = 0.5 + np.arctan2(rz, rx) / (2 * np.pi)
+    v = 0.5 - np.arcsin(np.clip(ry, -1, 1)) / np.pi
+
+    # Sample HDR via nearest-neighbour
+    px = np.clip((u * wm).astype(np.int32), 0, wm - 1)
+    py = np.clip((v * hm).astype(np.int32), 0, hm - 1)
+    bg = hdr[py, px].astype(np.float32)
+
+    # Exposure + Reinhard tonemap
+    if exposure != 0.0:
+        bg = bg * (2.0 ** exposure)
+    bg = bg / (1.0 + bg)
+    bg = np.clip(bg, 0.0, 1.0)
+
+    # Derive splat mask from render_at alpha channel directly:
+    # render_at returns RGBA where alpha=0 means no splat (background).
+    # If only 3 channels, use luminance threshold on black background pixels.
+    if ra.shape[2] == 4:
+        splat_mask = (ra[:, :, 3] > 0.05).astype(np.float32)[..., np.newaxis]
+        ra = ra[:, :, :3]
+    else:
+        # Black pixels in render_at are background — splat has colour
+        lum = ra.max(axis=2)
+        splat_mask = (lum > 0.01).astype(np.float32)[..., np.newaxis]
+
+    # Splat in front, HDR behind
+    return (ra * splat_mask + bg * (1.0 - splat_mask)).astype(np.float32)
+
+
 def _vp_get_view_params():
     view = lf.get_current_view()
     if view is None:
@@ -196,7 +258,7 @@ def _vp_bw2a(black_arr, white_arr):
 
 # ── Depth log ─────────────────────────────────────────────────────────────────
 
-DEPTH_LOG_PATH = r"c:\temp\DEPTH.TXT"
+DEPTH_LOG_PATH = r"u:\temp\DEPTH.TXT"
 
 def _depth_log(msg: str):
     try:
@@ -364,6 +426,10 @@ class DepthmapPanel(lf.ui.Panel):
         self._render_node_name    = ""
         self._render_rgb_pass     = False  # True when doing the RGB second pass
         self._render_rgb_only     = False  # True when skipping depth pass entirely
+        self._render_use_equirect  = False
+        self._render_equirect_path = ""     # full path to user's HDR/EXR/panorama
+        self._render_equirect_exposure = 0.0  # EV stops (+/- float)
+        self._equirect_cache       = None   # (path, numpy_array) cache last loaded
         self._render_rgb_paths    = []
 
         # Viewport export
@@ -505,6 +571,16 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind_func("video_quality_mbps",  lambda: f"{VIDEO_QUALITIES[self._video_quality][3] // 1_000_000} Mbps")
         model.bind_func("video_format_label",  lambda: VIDEO_FORMATS[self._video_format][0])
         model.bind_func("video_format_desc",   lambda: VIDEO_FORMAT_DESCS[self._video_format])
+        model.bind("equirect_path",
+                   lambda: self._render_equirect_path,
+                   self._on_set_equirect_path)
+        model.bind("equirect_exposure_str",
+                   lambda: f"{self._render_equirect_exposure:+.1f}",
+                   self._on_set_equirect_exposure)
+        model.bind_func("video_use_equirect",  lambda: self._render_use_equirect)
+        model.bind_func("video_no_equirect",         lambda: not self._render_use_equirect)
+        model.bind_event("toggle_video_equirect",    self._on_toggle_video_equirect)
+        model.bind_event("browse_equirect",          self._on_browse_equirect)
         model.bind_event("cycle_video_quality", self._on_cycle_video_quality)
         model.bind_event("cycle_video_format",  self._on_cycle_video_format)
         model.bind_func("render_duration_str", lambda: f"{self._render_total_frames / max(self._render_fps,1):.1f}s  ({self._render_total_frames} frames @ {self._render_fps}fps)")
@@ -919,6 +995,39 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             except Exception as e:
                 self._vp_set_status(f"Error: {e}", error=True)
 
+    def _render_frame_equirect(self, eye, target, up, fov, w, h):
+        """Render frame and composite equirectangular HDR background if enabled."""
+        # Always get render_at output — 3-channel, no bg
+        ra = _vp_render_at_explicit(eye, target, up, fov, w, h)
+        if not self._render_use_equirect or not self._render_equirect_path:
+            return ra
+        if ra is None:
+            return ra
+
+        # Load HDR (cached — only re-read if path changed)
+        hdr = None
+        if (self._equirect_cache is not None and
+                self._equirect_cache[0] == self._render_equirect_path):
+            hdr = self._equirect_cache[1]
+        else:
+            try:
+                import cv2 as _cv2
+                img = _cv2.imread(self._render_equirect_path,
+                                  _cv2.IMREAD_ANYDEPTH | _cv2.IMREAD_COLOR)
+                if img is not None:
+                    hdr = _cv2.cvtColor(img, _cv2.COLOR_BGR2RGB).astype(np.float32)
+                    self._equirect_cache = (self._render_equirect_path, hdr)
+                else:
+                    self._vp_set_status(f"Could not load equirect: {self._render_equirect_path}", error=True)
+                    return ra
+            except Exception as e:
+                self._vp_set_status(f"Equirect load error: {e}", error=True)
+                return ra
+
+        # Pass eye/target/up directly — composite derives rotation per-frame
+        return _equirect_composite(ra, hdr, eye, target, up,
+                                   fov, exposure=self._render_equirect_exposure)
+
     def _render_depth_video(self, output_dir, total_frames, fps):
         """Arm the per-frame render pump.  Actual work is driven one frame per
         on_update() tick on the main thread, so apply_depthmap_colors +
@@ -1017,7 +1126,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             # Use explicit camera params — _vp_render_at_size uses live viewport
             if self._video_use_custom_res:
                 vp_w, vp_h = self._video_custom_w, self._video_custom_h
-            arr = _vp_render_at_explicit(eye, target, up, fov, vp_w, vp_h)
+            arr = self._render_frame_equirect(eye, target, up, fov, vp_w, vp_h)
             if arr is not None:
                         rgb_dir = os.path.join(output_dir, "RGB")
                         os.makedirs(rgb_dir, exist_ok=True)
@@ -1331,6 +1440,45 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
     def _on_cancel_render(self, h, e, a):
         self._render_cancel = True
+
+    def _on_set_equirect_path(self, v):
+        self._render_equirect_path = str(v).strip()
+        self._equirect_cache = None   # invalidate cache
+        self._dirty("equirect_path")
+
+    def _on_set_equirect_exposure(self, v):
+        try:
+            self._render_equirect_exposure = float(v)
+        except ValueError:
+            pass
+
+    def _on_browse_equirect(self, h, e, a):
+        try:
+            userprofile = os.environ.get("USERPROFILE", "C:\\Users\\default")
+            initialdir  = os.path.dirname(self._render_equirect_path) if self._render_equirect_path else userprofile
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "$d = New-Object System.Windows.Forms.OpenFileDialog;"
+                f"$d.InitialDirectory = '{initialdir}';"
+                "$d.Filter = 'HDR/EXR images (*.hdr;*.exr;*.png;*.jpg)|*.hdr;*.exr;*.png;*.jpg|All files (*.*)|*.*';"
+                "$d.Title = 'Select equirectangular image';"
+                "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.FileName }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Sta", "-Command", ps_script],
+                capture_output=True, text=True, timeout=120
+            )
+            path = result.stdout.strip()
+            if path and os.path.exists(path):
+                self._render_equirect_path = path
+                self._equirect_cache = None
+                self._dirty("equirect_path")
+        except Exception as e:
+            self._vp_set_status(f"Browse error: {e}", error=True)
+
+    def _on_toggle_video_equirect(self, h, e, a):
+        self._render_use_equirect = not self._render_use_equirect
+        self._dirty("video_use_equirect", "video_no_equirect")
 
     def _on_cycle_video_quality(self, h, e, a):
         self._video_quality = (self._video_quality + 1) % len(VIDEO_QUALITIES)

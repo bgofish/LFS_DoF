@@ -239,6 +239,32 @@
       </div>
       <span class="text-dim">{{video_res_report}}</span>
 
+      <!-- ── Equirectangular background ──────────────────────────── -->
+      <div class="btn-row" style="margin-top:4dp;">
+        <button data-event-click="toggle_video_equirect"
+                data-if="video_no_equirect"
+                class="btn"
+                title="Enable equirectangular HDR background compositing.">Equirect BG: Off</button>
+        <button data-event-click="toggle_video_equirect"
+                data-if="video_use_equirect"
+                class="btn btn-active"
+                title="Disable equirectangular HDR background compositing.">Equirect BG: On</button>
+      </div>
+      <div data-if="video_use_equirect">
+        <div class="setting-row">
+          <input type="text" class="number-input" data-value="equirect_path"
+                 style="flex:1; min-width:0;" title="Full path to HDR/EXR equirectangular image." />
+          <button class="btn" data-event-click="browse_equirect"
+                  style="min-width:4em;" title="Browse for equirectangular image.">Browse</button>
+        </div>
+        <div class="setting-row">
+          <span class="prop-label">Exposure</span>
+          <input type="text" class="number-input fixed-input" data-value="equirect_exposure_str"
+                 title="Exposure adjustment in EV stops (e.g. +1.0, -0.5)." />
+          <span class="text-dim" style="margin-left:4dp;">EV</span>
+        </div>
+      </div>
+
       <!-- ── Quality ───────────────────────────────────────────── -->
       <div class="setting-row" style="margin-top:4dp;">
         <span class="prop-label">Quality</span>
