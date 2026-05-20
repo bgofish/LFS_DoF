@@ -48,7 +48,8 @@ Renders a depth-map video along an existing keyframe camera path:
 - IN DEVELOPMENT:  for standard RBG Video (ie no depth information this tool can be used for highly customised output: MP4/MKV/MOV/AVI/WebM and any resolution,
   4 differnt compression levels (10,20,50,100Mbps) & custom duration / FPS , Background HDRI can be loaded & rendered
 
-<img width="500" height="380" alt="image" src="https://github.com/user-attachments/assets/33b2bc0f-95ca-4aca-a80a-afdd020c431f" />
+
+<img width="600" height="350" alt="image" src="https://github.com/user-attachments/assets/f89a3c2b-bf31-4c75-88dc-78965fc819b0" />
 
 ---
 
