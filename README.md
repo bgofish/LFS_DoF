@@ -44,6 +44,8 @@ Renders a depth-map video along an existing keyframe camera path:
 - PNG frame outputs saved to two sub-folders `\DGS` (greyscales) & `\RGB` (Full colour) and `rgb_video.mp4` + `depth_video.mp4` are saved to the set output folder 
 - [Open DoF Video] - Launches **Video-DoF_Bokeh** with both videos pre-loaded, ready to apply depth-of-field bokeh. Currently this can only be automtically opened once per LFS session.
 - IN DEVELOPMENT:  for further 'launches' are requred within one session then the python script can be opened.
+  
+<img width="2559" height="1534" alt="image" src="https://github.com/user-attachments/assets/f1ba1769-5bde-4b3a-be0d-1ab3bdc29984" />
 
 - IN DEVELOPMENT:  for standard RBG Video (ie no depth information this tool can be used for highly customised output: MP4/MKV/MOV/AVI/WebM and any resolution,
   4 differnt compression levels (10,20,50,100Mbps) & custom duration / FPS , Background HDRI can be loaded & rendered
