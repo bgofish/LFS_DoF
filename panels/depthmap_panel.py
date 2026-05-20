@@ -43,14 +43,15 @@ VIDEO_FORMATS = [
     ("WebM", "webm", ".webm", ["libvpx-vp9", "libvpx"]),
 ]
 
-# (label, crf_h264, crf_vp9, bitrate_bps)
-# Bitrate is used for all encoders (HW and SW); CRF kept as fallback hint
-# for libx264/libvpx when bitrate-mode isn't supported.
+# (label, crf_h264, crf_vp9, bpp)
+# Bitrate is calculated per-encode from BPP * width * height * fps so quality
+# scales automatically with resolution and frame rate.
+# CRF values are no longer used (pure VBR bitrate mode for all codecs).
 VIDEO_QUALITIES = [
-    ("Very High", 16, 24, 100_000_000),
-    ("High",      22, 31,  50_000_000),
-    ("Medium",    28, 38,  20_000_000),
-    ("Low",       36, 48,  10_000_000),
+    ("Very High", 16, 24, 0.50),   # ~50 Mbps @ 1080p30 — pristine master quality
+    ("High",      22, 31, 0.20),   # ~20 Mbps @ 1080p30 — crisp, no macroblocking
+    ("Medium",    28, 38, 0.08),   # ~ 8 Mbps @ 1080p30 — balanced web standard
+    ("Low",       36, 48, 0.03),   # ~ 3 Mbps @ 1080p30 — compressed preview
 ]
 
 VIDEO_FORMAT_DESCS = [
@@ -568,7 +569,7 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind_event("set_video_res_custom",   self._on_set_video_res_custom)
         # Video quality + format
         model.bind_func("video_quality_label", lambda: VIDEO_QUALITIES[self._video_quality][0])
-        model.bind_func("video_quality_mbps",  lambda: f"{VIDEO_QUALITIES[self._video_quality][3] // 1_000_000} Mbps")
+        model.bind_func("video_quality_mbps",  lambda: f"~{VIDEO_QUALITIES[self._video_quality][3] * 1920 * 1080 * 30 / 1_000_000:.0f} Mbps")
         model.bind_func("video_format_label",  lambda: VIDEO_FORMATS[self._video_format][0])
         model.bind_func("video_format_desc",   lambda: VIDEO_FORMAT_DESCS[self._video_format])
         model.bind("equirect_path",
@@ -1047,6 +1048,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         self._render_frame_paths = []
         self._render_rgb_paths   = []
         self._render_node_name   = node_name
+        self._render_was_enabled = self._enabled  # snapshot viewport depth state before render
 
         if self._render_rgb_only:
             # Skip depth pass — start directly on the RGB pass
@@ -1156,13 +1158,18 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
         if self._render_frame_idx >= total_frames:
             if self._render_rgb_pass:
-                # RGB pass complete
+                # RGB pass complete — restore viewport to its pre-render state
                 self._render_active    = False
                 self._render_progress  = 1.0
                 self._render_rgb_pass  = False
-                if not self._render_rgb_only:
-                    # Full render: restore depth view in viewport
+                if getattr(self, '_render_was_enabled', False) and not self._render_rgb_only:
+                    # Depth view was active before render started — re-apply it
+                    self._enabled = True
                     self._apply_depthmap(silent=True)
+                else:
+                    # Viewport was in plain colour view — ensure it stays that way
+                    self._restore_original_colors(silent=True)
+                    self._enabled = False
                 self._finish_render_video()
             else:
                 # Depth pass done — start RGB pass
@@ -1180,7 +1187,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         output_dir  = self._render_output_dir
         fps         = self._render_fps
         fmt_label, fmt_container, fmt_ext, fmt_codecs = VIDEO_FORMATS[self._video_format]
-        q_label, q_crf_h264, q_crf_vp9, q_bitrate    = VIDEO_QUALITIES[self._video_quality]
+        q_label, q_crf_h264, q_crf_vp9, q_bpp = VIDEO_QUALITIES[self._video_quality]
 
         if not depth_paths and not rgb_paths:
             self._render_status = "No frames rendered"
@@ -1194,6 +1201,11 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                 first = _Image.open(frame_paths[0]).convert("RGB")
                 w, h  = first.size
 
+                # Calculate bitrate from BPP scaled to actual resolution + fps
+                bitrate_bps = int(w * h * fps * q_bpp)
+                maxrate     = int(bitrate_bps * 1.25)
+                bufsize     = int(bitrate_bps * 2)
+
                 stream    = None
                 container = None
                 used      = None
@@ -1203,12 +1215,27 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                         if container:
                             try: container.close()
                             except: pass
+
+                        # Codec-appropriate options — must be passed before add_stream
+                        # opens the context; assigning to codec_context.options after is a no-op
+                        if any(x in codec for x in ("nvenc", "amf", "qsv")):
+                            codec_opts = {"rc": "vbr", "maxrate": str(maxrate), "bufsize": str(bufsize)}
+                        elif codec in ("libx264", "libopenh264"):
+                            codec_opts = {"b:v": str(bitrate_bps), "maxrate": str(maxrate),
+                                          "bufsize": str(bufsize), "preset": "medium"}
+                        else:
+                            # mpeg4: b:v via options + codec_context.bit_rate for belt-and-braces
+                            codec_opts = {"b:v": str(bitrate_bps), "maxrate": str(maxrate),
+                                          "bufsize": str(bufsize)}
+
                         container = av.open(video_path, mode="w", format=fmt_container)
-                        stream = container.add_stream(codec, rate=fps)
-                        stream.width  = w
-                        stream.height = h
-                        stream.pix_fmt = "yuv420p"
-                        stream.bit_rate = q_bitrate
+                        stream = container.add_stream(codec, rate=fps, options=codec_opts)
+                        stream.width    = w
+                        stream.height   = h
+                        stream.pix_fmt  = "yuv420p"
+                        stream.bit_rate = bitrate_bps
+                        stream.codec_context.bit_rate = bitrate_bps
+
                         # Test codec by encoding the actual first frame —
                         # no blank probe frame so no green screen at start.
                         img0  = _Image.open(frame_paths[0]).convert("RGB")
@@ -1216,7 +1243,8 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                         frm0.pts = 0
                         list(stream.encode(frm0))
                         used = codec
-                        _depth_log(f"ENCODE | codec={codec} quality={q_label} format={fmt_label} OK")
+                        _depth_log(f"ENCODE | codec={codec} quality={q_label} "
+                                   f"{bitrate_bps/1_000_000:.1f}Mbps format={fmt_label} OK")
                         break
                     except Exception as ce:
                         _depth_log(f"ENCODE | codec={codec} failed: {ce}")
@@ -1426,7 +1454,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             import tempfile
             bat_lines = [
                 "@echo off",
-                f'"{python_exe}" "{script_path}" "{depth_path}" "{rgb_path}"',
+                f'"{python_exe}" "{script_path}" "{rgb_path}" "{depth_path}"',
             ]
             tmp = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".bat", delete=False, encoding="utf-8"
@@ -1636,12 +1664,13 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
     def _on_open_dof_video(self, h, e, a):
         """Launch Video-DoF_Bokeh.py with the last rendered video pair."""
-        depth_path = os.path.join(self._render_output_dir, "depth_video.mp4")
-        rgb_path   = os.path.join(self._render_output_dir, "rgb_video.mp4")
-        missing = [p for p in (depth_path, rgb_path) if not os.path.exists(p)]
+        fmt_ext    = VIDEO_FORMATS[self._video_format][2]
+        rgb_path   = os.path.join(self._render_output_dir, f"rgb_video{fmt_ext}")
+        depth_path = os.path.join(self._render_output_dir, f"depth_video{fmt_ext}")
+        missing = [p for p in (rgb_path, depth_path) if not os.path.exists(p)]
         if missing:
             self._vp_set_status(
-                f"File not found: {os.path.basename(missing[0])}", error=True)
+                f"File not found: {os.path.basename(missing[0])} — render first", error=True)
             return
         script = str(Path(__file__).parent.parent / "python" / "Video-DoF_Bokeh.py")
         if not os.path.exists(script):
@@ -1650,8 +1679,9 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         try:
             import threading as _t, sys as _sys
 
-            def _launch(dep=depth_path, rgb=rgb_path, scr=script):
-                _sys.argv = [scr, dep, rgb]
+            def _launch(rgb=rgb_path, dep=depth_path, scr=script):
+                # argv[1] = colour/RGB video, argv[2] = depth/greyscale video
+                _sys.argv = [scr, rgb, dep]
                 code = Path(scr).read_text(encoding="utf-8")
                 try:
                     exec(compile(code, scr, "exec"),
