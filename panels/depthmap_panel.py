@@ -12,7 +12,7 @@ import sys
 import numpy as np
 import lichtfeld as lf
 
-from ..core.depthmap import (apply_depthmap_colors, _get_export_camera_pos,
+from ..core.depthmap import (_get_export_camera_pos,
                              _get_keyframe_transforms, _interpolate_keyframe_transform,
                              _camera_state_from_transform)
 
@@ -171,6 +171,11 @@ def _vp_render_at_explicit(eye, target, up, fov, width, height):
     except Exception as e:
         _depth_log(f"render_at_explicit error: {e}")
         return None
+
+def _vp_render_at_size(width, height, bg_color=None):
+    """render_at sized for export (1080p/1440p/4K/8K) — uses the live
+    viewport's current eye/target/up/fov, optionally with a solid
+    background colour (used by the BW2A transparency export path)."""
     params = _vp_get_view_params()
     if params is None:
         return None
@@ -281,26 +286,6 @@ def _depthmap_draw_handler(ctx):
     if panel is None:
         return
 
-    # For camera-axis mode, detect viewport movement and mark dirty so live
-    # preview re-applies depth from the new camera position every frame.
-    if panel._enabled and panel._live_preview:
-        axis = panel.AXIS_ITEMS[panel._axis_idx][0]
-        if axis == "camera":
-            params = _vp_get_view_params()
-            if params:
-                cam_pos = params[0]  # eye position tuple
-                if _last_cam_pos is None or cam_pos != _last_cam_pos:
-                    _last_cam_pos = cam_pos
-                    panel._settings_dirty = True
-
-    # Live preview — fires every frame exactly like the original draw() method.
-    if panel._settings_dirty:
-        if panel._enabled and panel._live_preview:
-            panel._settings_dirty = False
-            panel._apply_depthmap(silent=True)
-        else:
-            panel._settings_dirty = False
-
     # Render progress polling
     if panel._render_active:
         lf.ui.request_redraw()
@@ -363,41 +348,18 @@ class DepthmapPanel(lf.ui.Panel):
     height_mode        = lf.ui.PanelHeightMode.CONTENT
     update_interval_ms = 150
 
-    COLORMAP_ITEMS = [
-        ("grayscale", "Grayscale"),
-        ("jet",       "Jet (Rainbow)"),
-        ("turbo",     "Turbo"),
-        ("viridis",   "Viridis"),
-    ]
-    AXIS_ITEMS = [
-        ("z",      "Z-Axis (Depth)"),
-        ("y",      "Y-Axis (Height)"),
-        ("x",      "X-Axis (Side)"),
-        ("camera", "Camera - Parallel (Projective)"),
-        ("camera", "Camera - Radial (Spherical)"),
-    ]
-
     def __init__(self):
         global panel
         panel = self
 
         # Core state
-        self._enabled          = False
-        self._live_preview     = True
-        self._colormap_idx     = 0
-        self._axis_idx         = 0
-        self._invert           = False
-        self._saved_colors     = {}
-        self._saved_shN        = {}
         self._current_target   = None
-        self._depth_map_active = False
 
-        # Range
-        self._use_custom_range     = False
-        self._use_selection_method = False
+        # Range — these mirror Lichtfeld's native depth_view_range and are
+        # kept locally only so Pick Point labels can show a value the moment
+        # a point is clicked, before the next on_update() tick reads it back.
         self._min_depth            = None
         self._max_depth            = None
-        self._range_only           = False
         self._point1_pos           = None
         self._point2_pos           = None
         self._captured_pos         = None
@@ -424,7 +386,6 @@ class DepthmapPanel(lf.ui.Panel):
         # Frame-pump state (driven from on_update on the main thread)
         self._render_frame_idx    = 0
         self._render_frame_paths  = []
-        self._render_node_name    = ""
         self._render_rgb_pass     = False  # True when doing the RGB second pass
         self._render_rgb_only     = False  # True when skipping depth pass entirely
         self._render_use_equirect  = False
@@ -432,6 +393,11 @@ class DepthmapPanel(lf.ui.Panel):
         self._render_equirect_exposure = 0.0  # EV stops (+/- float)
         self._equirect_cache       = None   # (path, numpy_array) cache last loaded
         self._render_rgb_paths    = []
+        # Native depth_view snapshot — set when a render starts, restored
+        # when it finishes/cancels (replaces the old per-frame colour bake).
+        self._render_was_depth_view = False
+        self._render_was_depth_mode = "gray"
+        self._render_depth_mode     = "gray"
 
         # Viewport export
         self._vp_export_resolution_idx = 0
@@ -455,34 +421,25 @@ class DepthmapPanel(lf.ui.Panel):
         _ensure_draw_handler()
         model = ctx.create_data_model("depthmap_panel")
 
-        # ── Target / enable ──────────────────────────────────────────────
+        # ── Target ───────────────────────────────────────────────────────
         model.bind_func("target_name",    lambda: self._get_selected_splat_name() or "")
         model.bind_func("no_splat",       lambda: self._get_selected_splat_name() is None)
         model.bind_func("has_splat",      lambda: self._get_selected_splat_name() is not None)
-        model.bind_func("enabled",        lambda: self._enabled)
-        model.bind_func("disabled",       lambda: not self._enabled)
-        model.bind_event("toggle_enable", self._on_toggle_enable)
-        model.bind_func("live_preview",     lambda: self._live_preview)
-        model.bind_func("not_live_preview", lambda: not self._live_preview)
-        model.bind_event("toggle_live",   self._on_toggle_live)
 
-        # ── Colormap ─────────────────────────────────────────────────────
-        model.bind_func("colormap_label", lambda: self.COLORMAP_ITEMS[self._colormap_idx][1])
-        for i, (key, label) in enumerate(self.COLORMAP_ITEMS):
-            idx = i
-            model.bind_event(f"set_cmap_{i}", lambda h, e, a, i=idx: self._on_set_colormap(i))
-            model.bind_func(f"cmap_{i}_active", lambda i=idx: self._colormap_idx == i)
-        model.bind_func("invert",          lambda: self._invert)
-        model.bind_event("toggle_invert",  self._on_toggle_invert)
+        # ── Depth Map (native lf.depth_view toggle) ─────────────────────────
+        model.bind_func("depth_mode_gray_active",
+                         lambda: lf.get_depth_view() and lf.get_depth_view_mode() == "gray")
+        model.bind_func("depth_mode_color_active",
+                         lambda: lf.get_depth_view() and lf.get_depth_view_mode() == "palette")
+        model.bind_func("depth_mode_off_active", lambda: not lf.get_depth_view())
+        model.bind_func("depth_mode_label",
+                         lambda: (f"{lf.get_depth_view_mode().capitalize()} (ON)"
+                                  if lf.get_depth_view() else "OFF"))
+        model.bind_event("set_depth_mode_gray",  self._on_set_depth_mode_gray)
+        model.bind_event("set_depth_mode_color", self._on_set_depth_mode_color)
+        model.bind_event("set_depth_mode_off",   self._on_set_depth_mode_off)
 
-        # ── Axis ─────────────────────────────────────────────────────────
-        model.bind_func("axis_label", lambda: self.AXIS_ITEMS[self._axis_idx][1])
-        for i, (key, label) in enumerate(self.AXIS_ITEMS):
-            idx = i
-            model.bind_event(f"set_axis_{i}", lambda h, e, a, i=idx: self._on_set_axis(i))
-            model.bind_func(f"axis_{i}_active", lambda i=idx: self._axis_idx == i)
-
-        # ── Depth Range ───────────────────────────────────────────────────
+        # ── Depth Range (drives lf.set_depth_view_range) ───────────────────
         model.bind_func("point1_set",   lambda: self._point1_pos is not None)
         model.bind_func("point1_unset", lambda: self._point1_pos is None)
         model.bind_func("point1_label", lambda: f"Point 1 (Min): {self._min_depth:.2f}" if self._point1_pos else "Point 1 (Min): Not set")
@@ -500,7 +457,7 @@ class DepthmapPanel(lf.ui.Panel):
 
         model.bind_func("has_points",     lambda: self._point1_pos is not None or self._point2_pos is not None)
         model.bind_event("clear_points",  self._on_clear_points)
-        model.bind_func("has_range",      lambda: self._use_custom_range and self._min_depth is not None)
+        model.bind_func("has_range",      lambda: self._min_depth is not None)
 
         model.bind_func("min_depth_str",  lambda: f"{self._min_depth:.2f}" if self._min_depth is not None else "—")
         model.bind_func("max_depth_str",  lambda: f"{self._max_depth:.2f}" if self._max_depth is not None else "—")
@@ -525,26 +482,13 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind_event("max_add001", lambda h, e, a: self._nudge_depth("max", +0.01))
         model.bind_event("swap_range", self._on_swap_range)
         model.bind_func("min_gt_max",  lambda: (self._min_depth or 0) > (self._max_depth or 0))
-        model.bind_func("range_only",  lambda: self._range_only)
-        model.bind_event("toggle_range_only", self._on_toggle_range_only)
-
-        # ── Apply / Restore ───────────────────────────────────────────────
-        model.bind_event("apply_depthmap",   self._on_apply)
-        model.bind_event("update_depthmap",  self._on_update)
-        model.bind_event("restore_original", self._on_restore)
-
-        # ── Presets ───────────────────────────────────────────────────────
-        model.bind_event("preset_gray_z",   lambda h, e, a: self._apply_preset(0, 0))
-        model.bind_event("preset_jet_z",  lambda h, e, a: self._apply_preset(1, 0))
-        model.bind_event("preset_turbo_z", lambda h, e, a: self._apply_preset(2, 0))
-        model.bind_event("preset_cam_p",   lambda h, e, a: self._apply_preset(0, 3))
-        model.bind_event("preset_cam_o",   lambda h, e, a: self._apply_preset(0, 4))
 
         # ── Status ────────────────────────────────────────────────────────
         model.bind_func("status_msg",     lambda: self._status_msg)
         model.bind_func("status_ok",      lambda: not self._status_is_error and bool(self._status_msg))
         model.bind_func("status_err",     lambda: self._status_is_error and bool(self._status_msg))
         model.bind_func("has_status",     lambda: bool(self._status_msg))
+
 
         # ── Render Video ──────────────────────────────────────────────────
         model.bind("render_output_dir",
@@ -609,7 +553,8 @@ class DepthmapPanel(lf.ui.Panel):
         model.bind("vp_compress_str",
                    lambda: str(self._vp_export_compress),
                    self._on_set_vp_compress)
-        model.bind_func("vp_transparency",  lambda: self._vp_export_transparency)
+        model.bind_func("vp_transparency",    lambda: self._vp_export_transparency)
+        model.bind_func("vp_no_transparency", lambda: not self._vp_export_transparency)
         model.bind_event("toggle_vp_transp", self._on_toggle_vp_transp)
         model.bind_func("vp_export_label",  lambda: f"Export {VP_RESOLUTIONS[self._vp_export_resolution_idx][0]} PNG")
         model.bind_event("do_vp_export",    self._on_vp_export)
@@ -648,6 +593,15 @@ class DepthmapPanel(lf.ui.Panel):
             self._status_msg = "Picking cancelled"
             self._status_is_error = False
 
+        # Mirror Lichtfeld's native depth_view_range into our local labels,
+        # so editing Near/Far on the native overlay (top-left of viewport)
+        # stays in sync with what the panel shows.
+        try:
+            near, far = lf.get_depth_view_range()
+            self._min_depth, self._max_depth = near, far
+        except Exception:
+            pass
+
         # Drive the video render pump — one frame per update tick.
         if self._render_active:
             self._render_pump_frame()
@@ -660,8 +614,10 @@ class DepthmapPanel(lf.ui.Panel):
                     "render_active", "render_idle", "render_progress", "render_progress_pct", "render_status",
                     "render_status_ok", "render_status_err",
                     "vp_status", "vp_status_ok", "vp_status_err",
-                    "min_gt_max",
-                    "live_preview", "not_live_preview",
+                    "vp_transparency", "vp_no_transparency",
+                    "min_gt_max", "min_depth_str", "max_depth_str", "has_range",
+                    "depth_mode_gray_active", "depth_mode_color_active",
+                    "depth_mode_off_active", "depth_mode_label",
                     "video_collapsed", "video_expanded",
                     "export_collapsed", "export_expanded",
                     )
@@ -695,122 +651,15 @@ class DepthmapPanel(lf.ui.Panel):
                 return node.name
         return None
 
-    def _save_original_colors(self, node_name, force=False):
-        if not force and node_name in self._saved_colors:
-            return True
-        scene = lf.get_scene()
-        if not scene:
-            return False
-        node = scene.get_node(node_name)
-        if not node:
-            return False
-        splat = node.splat_data()
-        if splat:
-            self._saved_colors[node_name] = splat.sh0_raw.clone().cpu()
-            shN = splat.shN_raw
-            if shN is not None and shN.shape[0] > 0:
-                self._saved_shN[node_name] = shN.clone().cpu()
-            self._current_target = node_name
-            return True
-        return False
-
-    def _restore_original_colors(self, silent=False):
-        node_name = self._current_target or self._get_selected_splat_name()
-        if not node_name or node_name not in self._saved_colors:
-            if not silent:
-                self._status_msg = "No saved colors to restore"
-                self._status_is_error = True
-            return False
-        scene = lf.get_scene()
-        if not scene:
-            return False
-        node = scene.get_node(node_name)
-        if not node:
-            return False
-        splat = node.splat_data()
-        if splat:
-            try:
-                saved = self._saved_colors[node_name].cuda()
-                sh0_tensor = splat.sh0_raw
-                sh0_tensor[:] = saved
-                if node_name in self._saved_shN:
-                    saved_shN = self._saved_shN[node_name].cuda()
-                    shN_tensor = splat.shN_raw
-                    if shN_tensor is not None:
-                        shN_tensor[:] = saved_shN
-                scene.notify_changed()
-                lf.ui.request_redraw()
-                self._depth_map_active = False
-                if not silent:
-                    self._status_msg = "Restored original colors"
-                    self._status_is_error = False
-                return True
-            except Exception as e:
-                if not silent:
-                    self._status_msg = f"Restore error: {e}"
-                    self._status_is_error = True
-        return False
-
-    def _get_depth_from_position(self, pos):
-        axis = self.AXIS_ITEMS[self._axis_idx][0]
-        if axis == "x":
-            return pos[0]
-        elif axis == "y":
-            return pos[1]
-        elif axis == "z":
-            return pos[2]
-        elif axis == "camera":
-            view = lf.get_current_view()
-            if view:
-                cam_pos = np.array(view.translation.numpy()).flatten()
-                return float(np.linalg.norm(np.array(pos) - cam_pos))
-        return pos[2]
-
-    def _apply_depthmap(self, silent=False):
-        node_name = self._get_selected_splat_name()
-        if not node_name:
-            if not silent:
-                self._status_msg = "No splat selected"
-                self._status_is_error = True
-            return False
-        axis = self.AXIS_ITEMS[self._axis_idx][0]
-        colormap = self.COLORMAP_ITEMS[self._colormap_idx][0]
-        min_d = self._min_depth if self._use_custom_range else None
-        max_d = self._max_depth if self._use_custom_range else None
-        original_sh0 = self._saved_colors.get(node_name)
-        original_sh0_np = original_sh0.numpy() if original_sh0 is not None else None
-        try:
-            ok, msg = apply_depthmap_colors(
-                node_name=node_name,
-                colormap=colormap,
-                axis=axis,
-                min_depth=min_d,
-                max_depth=max_d,
-                range_only=self._range_only,
-                invert=self._invert,
-                original_sh0=original_sh0_np,
-            )
-            self._depth_map_active = ok
-            if not silent:
-                self._status_msg = msg
-                self._status_is_error = not ok
-            return ok
-        except Exception as e:
-            if not silent:
-                self._status_msg = f"Error: {e}"
-                self._status_is_error = True
-            _depth_log(f"APPLY ERROR: {e}")
-            return False
-
-    def _apply_preset(self, cmap_idx, axis_idx):
-        self._colormap_idx = cmap_idx
-        self._axis_idx = axis_idx
-        node_name = self._get_selected_splat_name()
-        if node_name and not self._enabled:
-            self._save_original_colors(node_name, force=True)
-            self._enabled = True
-        self._apply_depthmap()
-        self._dirty_all()
+    def _camera_distance(self, pos):
+        """Distance from the current viewport camera to a 3D world position.
+        Native depth_view always visualizes true camera-space depth, so this
+        is the only depth measure Pick Point needs now."""
+        view = lf.get_current_view()
+        if view:
+            cam_pos = np.array(view.translation.numpy()).flatten()
+            return float(np.linalg.norm(np.array(pos) - cam_pos))
+        return float(pos[2])
 
     def _start_picking(self, point_num):
         self._picking_point = point_num
@@ -836,7 +685,7 @@ class DepthmapPanel(lf.ui.Panel):
     def _on_pick_result(self, world_pos, point_num):
         """Called directly by the modal operator on each click."""
         self._captured_pos = world_pos
-        self._captured_depth = self._get_depth_from_position(world_pos)
+        self._captured_depth = self._camera_distance(world_pos)
         if point_num == 1:
             self._point1_pos = world_pos
             self._min_depth = self._captured_depth
@@ -845,23 +694,28 @@ class DepthmapPanel(lf.ui.Panel):
             self._point2_pos = world_pos
             self._max_depth = self._captured_depth
             self._status_msg = f"Point 2: {self._max_depth:.2f}"
-        self._use_custom_range = True
         self._status_is_error = False
-        node_name = self._get_selected_splat_name()
-        if node_name:
-            if not self._enabled:
-                self._save_original_colors(node_name, force=True)
-                self._enabled = True
-            self._apply_depthmap(silent=False)
+        self._push_depth_range()
         self._dirty_all()
+
+    def _push_depth_range(self):
+        """Push our locally-tracked min/max straight into Lichtfeld's native
+        depth_view_range so the (already-active or about-to-be-activated)
+        native Depth Map overlay reflects it immediately."""
+        if self._min_depth is None or self._max_depth is None:
+            return
+        try:
+            lf.set_depth_view_range(self._min_depth, self._max_depth)
+            lf.ui.request_redraw()
+        except Exception as e:
+            _depth_log(f"set_depth_view_range error: {e}")
 
     def _nudge_depth(self, which, delta):
         if which == "min":
             self._min_depth = (self._min_depth or 0.0) + delta
         else:
             self._max_depth = (self._max_depth or 0.0) + delta
-        self._use_custom_range = True
-        self._settings_dirty = True
+        self._push_depth_range()
         self._dirty("min_depth_val", "max_depth_val", "min_depth_str", "max_depth_str", "min_gt_max")
 
     def _vp_size_hint(self):
@@ -1030,12 +884,12 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                                    fov, exposure=self._render_equirect_exposure)
 
     def _render_depth_video(self, output_dir, total_frames, fps):
-        """Arm the per-frame render pump.  Actual work is driven one frame per
-        on_update() tick on the main thread, so apply_depthmap_colors +
-        notify_changed are fully flushed before render_at is called."""
-        node_name = self._get_selected_splat_name()
-        if not node_name:
-            self._render_status = "ERROR: No splat selected"
+        """Arm the per-frame render pump. Uses Lichtfeld's native depth_view
+        toggle for the depth pass — render_at() respects it directly, so
+        there is no per-frame colour baking, no GPU flush to wait on, and
+        no splat data is ever touched."""
+        if not lf.has_scene():
+            self._render_status = "ERROR: No scene loaded"
             self._dirty("render_status", "render_status_err")
             return
 
@@ -1047,8 +901,9 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         self._render_frame_idx   = 0
         self._render_frame_paths = []
         self._render_rgb_paths   = []
-        self._render_node_name   = node_name
-        self._render_was_enabled = self._enabled  # snapshot viewport depth state before render
+        self._render_was_depth_view = lf.get_depth_view()
+        self._render_was_depth_mode = lf.get_depth_view_mode()
+        self._render_depth_mode     = lf.get_depth_view_mode() or "gray"
 
         if self._render_rgb_only:
             # Skip depth pass — start directly on the RGB pass
@@ -1058,53 +913,41 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             self._render_rgb_pass = False
             self._render_status   = "Starting..." 
 
+    def _restore_render_depth_view(self):
+        try:
+            lf.set_depth_view(self._render_was_depth_view)
+            lf.set_depth_view_mode(self._render_was_depth_mode)
+            lf.ui.request_redraw()
+        except Exception as e:
+            _depth_log(f"restore depth_view error: {e}")
+
     def _render_pump_frame(self):
         """Called by on_update() once per tick while a render is active.
-        Applies depth, notifies scene, then immediately renders — all on the
-        main thread so the GPU flush between apply and render_at is guaranteed."""
+        Toggles the native depth_view state for the current pass, then
+        renders directly — render_at() honours depth_view, so each frame
+        is just a state flip + a render call."""
         i            = self._render_frame_idx
         total_frames = self._render_total_frames
         output_dir   = self._render_output_dir
-        node_name    = self._render_node_name
 
         if self._render_cancel:
             self._render_status  = "Cancelled"
             self._render_active  = False
+            self._restore_render_depth_view()
             return
 
-        # ── 1. Update depth colors for this frame ────────────────────────
-        axis  = self.AXIS_ITEMS[self._axis_idx][0]
-        cmap  = self.COLORMAP_ITEMS[self._colormap_idx][0]
-        min_d = self._min_depth if self._use_custom_range else None
-        max_d = self._max_depth if self._use_custom_range else None
-
-        if self._render_rgb_pass:
-            # RGB pass — restore original colours (camera still moves for depth calc)
-            try:
-                self._restore_original_colors(silent=True)
-                scene = lf.get_scene()
-                if scene: scene.notify_changed()
-            except Exception as e:
-                _depth_log(f"RENDER PUMP RGB restore ERROR frame {i}: {e}")
-                self._render_status = f"ERROR rgb frame {i}: {e}"
-                self._render_active = False
-                return
-        else:
-            # Depth pass — apply depthmap colours
-            try:
-                apply_depthmap_colors(
-                    node_name=node_name, colormap=cmap, axis=axis,
-                    min_depth=min_d, max_depth=max_d,
-                    invert=self._invert,
-                    current_frame=i, total_frames=total_frames,
-                )
-                scene = lf.get_scene()
-                if scene: scene.notify_changed()
-            except Exception as e:
-                _depth_log(f"RENDER PUMP ERROR frame {i}: {e}")
-                self._render_status = f"ERROR frame {i}: {e}"
-                self._render_active = False
-                return
+        # ── 1. Ensure correct native depth_view state for this pass ───────
+        try:
+            if self._render_rgb_pass:
+                lf.set_depth_view(False)
+            else:
+                lf.set_depth_view_mode(self._render_depth_mode)
+                lf.set_depth_view(True)
+        except Exception as e:
+            _depth_log(f"RENDER PUMP depth_view ERROR frame {i}: {e}")
+            self._render_status = f"ERROR frame {i}: {e}"
+            self._render_active = False
+            return
 
         # ── 2. Render this frame from the keyframe camera position ────────
         params = _vp_get_view_params()
@@ -1129,9 +972,6 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
             if self._video_use_custom_res:
                 vp_w, vp_h = self._video_custom_w, self._video_custom_h
             arr = self._render_frame_equirect(eye, target, up, fov, vp_w, vp_h)
-            if arr is not None:
-                        rgb_dir = os.path.join(output_dir, "RGB")
-                        os.makedirs(rgb_dir, exist_ok=True)
             if arr is not None:
                 from PIL import Image as _Image
                 if self._render_rgb_pass:
@@ -1162,14 +1002,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                 self._render_active    = False
                 self._render_progress  = 1.0
                 self._render_rgb_pass  = False
-                if getattr(self, '_render_was_enabled', False) and not self._render_rgb_only:
-                    # Depth view was active before render started — re-apply it
-                    self._enabled = True
-                    self._apply_depthmap(silent=True)
-                else:
-                    # Viewport was in plain colour view — ensure it stays that way
-                    self._restore_original_colors(silent=True)
-                    self._enabled = False
+                self._restore_render_depth_view()
                 self._finish_render_video()
             else:
                 # Depth pass done — start RGB pass
@@ -1296,42 +1129,6 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
     # ── Event handlers ────────────────────────────────────────────────────────
 
-    def _on_toggle_enable(self, h, e, a):
-        node_name = self._get_selected_splat_name()
-        if not node_name:
-            return
-        self._enabled = not self._enabled
-        if self._enabled:
-            self._save_original_colors(node_name, force=True)
-            self._apply_depthmap(silent=True)
-        else:
-            self._restore_original_colors(silent=True)
-        self._dirty("enabled", "disabled", "live_preview", "not_live_preview")
-
-    def _on_toggle_live(self, h, e, a):
-        self._live_preview = not self._live_preview
-        self._dirty("live_preview", "not_live_preview")
-        lf.ui.request_redraw()
-
-    def _on_set_colormap(self, idx):
-        self._colormap_idx = idx
-        self._settings_dirty = True
-        self._dirty("colormap_label", *[f"cmap_{i}_active" for i in range(len(self.COLORMAP_ITEMS))])
-
-    def _on_toggle_invert(self, h, e, a):
-        self._invert = not self._invert
-        self._settings_dirty = True
-        self._dirty("invert")
-
-    def _on_set_axis(self, idx):
-        self._axis_idx = idx
-        # Cam P (idx 3) and Cam O (idx 4) both default to greyscale
-        if idx in (3, 4):
-            self._colormap_idx = 1  # grayscale
-            self._dirty("colormap_label", *[f"cmap_{i}_active" for i in range(len(self.COLORMAP_ITEMS))])
-        self._settings_dirty = True
-        self._dirty("axis_label", *[f"axis_{i}_active" for i in range(len(self.AXIS_ITEMS))])
-
     def _on_pick_p1(self, h, e, a):
         self._start_picking(1)
 
@@ -1350,19 +1147,15 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
     def _on_clear_points(self, h, e, a):
         self._point1_pos = None
         self._point2_pos = None
-        self._use_custom_range = False
         self._status_msg = "Points cleared"
         self._status_is_error = False
         self._picking_point = 0
-        self._settings_dirty = True
         self._dirty_all()
 
     def _on_set_min_depth(self, v):
         try:
             self._min_depth = float(v)
-            self._use_custom_range = True
-            if self._enabled and self._live_preview:
-                self._apply_depthmap(silent=True)
+            self._push_depth_range()
             self._dirty("min_depth_str", "min_gt_max")
         except ValueError:
             pass
@@ -1370,43 +1163,39 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
     def _on_set_max_depth(self, v):
         try:
             self._max_depth = float(v)
-            self._use_custom_range = True
-            if self._enabled and self._live_preview:
-                self._apply_depthmap(silent=True)
+            self._push_depth_range()
             self._dirty("max_depth_str", "min_gt_max")
         except ValueError:
             pass
 
     def _on_swap_range(self, h, e, a):
         self._min_depth, self._max_depth = self._max_depth, self._min_depth
-        self._settings_dirty = True
+        self._push_depth_range()
         self._dirty("min_depth_val", "max_depth_val", "min_depth_str", "max_depth_str", "min_gt_max")
 
-    def _on_toggle_range_only(self, h, e, a):
-        self._range_only = not self._range_only
-        self._settings_dirty = True
-        self._dirty("range_only")
+    def _on_set_depth_mode_gray(self, h, e, a):
+        lf.set_depth_view_mode("gray")
+        lf.set_depth_view(True)
+        lf.ui.request_redraw()
+        self._dirty("depth_mode_gray_active", "depth_mode_color_active",
+                    "depth_mode_off_active", "depth_mode_label")
 
-    def _on_apply(self, h, e, a):
-        node_name = self._get_selected_splat_name()
-        if node_name:
-            self._save_original_colors(node_name, force=True)
-            self._apply_depthmap()
-            self._enabled = True
-        self._dirty_all()
+    def _on_set_depth_mode_color(self, h, e, a):
+        lf.set_depth_view_mode("palette")
+        lf.set_depth_view(True)
+        lf.ui.request_redraw()
+        self._dirty("depth_mode_gray_active", "depth_mode_color_active",
+                    "depth_mode_off_active", "depth_mode_label")
 
-    def _on_update(self, h, e, a):
-        self._apply_depthmap()
-
-    def _on_restore(self, h, e, a):
-        self._restore_original_colors()
-        self._enabled = False
-        self._dirty_all()
+    def _on_set_depth_mode_off(self, h, e, a):
+        lf.set_depth_view(False)
+        lf.ui.request_redraw()
+        self._dirty("depth_mode_gray_active", "depth_mode_color_active",
+                    "depth_mode_off_active", "depth_mode_label")
 
     def _on_render_video(self, h, e, a):
-        node_name = self._get_selected_splat_name()
-        if not node_name:
-            self._render_status = "ERROR: Select a splat first"
+        if not lf.has_scene():
+            self._render_status = "ERROR: No scene loaded"
             self._dirty("render_status", "render_status_err")
             return
         self._render_rgb_only = False
@@ -1418,9 +1207,8 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
         self._dirty("render_active", "render_idle")
 
     def _on_render_rgb_only_video(self, h, e, a):
-        node_name = self._get_selected_splat_name()
-        if not node_name:
-            self._render_status = "ERROR: Select a splat first"
+        if not lf.has_scene():
+            self._render_status = "ERROR: No scene loaded"
             self._dirty("render_status", "render_status_err")
             return
         self._render_rgb_only = True
@@ -1757,16 +1545,14 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
     def _on_vp_export(self, h, e, a):
         """Dual-capture export — saves two PNGs for Still-DoF_Bokeh.py:
-        1. Restore original colours  → capture → VIEWPORT_DRGB.png  (colour, depth OFF)
-        2. Re-apply depthmap         → capture → VIEWPORT_DGSC.png  (greyscale depth, depth ON)
+        1. Native depth_view OFF → capture → VIEWPORT_DRGB.png  (colour)
+        2. Native depth_view ON, mode='gray' → capture → VIEWPORT_DGSC.png  (greyscale depth)
         Use "Open DoF Still" button to launch the compositor with these files.
-        All GPU state changes are sequenced through the draw handler so each
-        capture sees the correct fully-rendered frame."""
-        node_name = self._get_selected_splat_name()
-        if not node_name:
-            self._vp_set_status("No splat selected.", error=True)
-            return
-
+        Uses Lichtfeld's built-in depth-view toggle (lf.set_depth_view /
+        lf.set_depth_view_mode) instead of baking colours into splat SH0 —
+        no splat data is touched, so there is nothing to corrupt or restore
+        on the splat side. Only the depth_view render setting itself is
+        snapshotted and restored once the export completes."""
         out_dir   = self._render_output_dir
         rgb_path  = os.path.join(out_dir, "VIEWPORT_DRGB.png")
         gsc_path  = os.path.join(out_dir, "VIEWPORT_DGSC.png")
@@ -1774,21 +1560,23 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
 
         os.makedirs(out_dir, exist_ok=True)
 
+        # Snapshot current depth-view state so it can be restored exactly.
+        was_depth_view  = lf.get_depth_view()
+        was_depth_mode  = lf.get_depth_view_mode()
+        was_depth_range = lf.get_depth_view_range()
+
         # State machine driven from draw handler:
-        #  step 1 → restore colours, mark dirty, wait frame
-        #  step 2 → capture RGB, re-apply depthmap, wait frame
-        #  step 3 → capture GSC, restore state, launch script
-        state = {"step": 1, "was_enabled": self._enabled, "target_h": VP_RESOLUTIONS[self._vp_export_resolution_idx][1]}
+        #  step 1 → ensure depth_view OFF, wait frame
+        #  step 2 → capture RGB, switch depth_view ON (gray), wait frame
+        #  step 3 → capture GSC, restore depth_view state
+        state = {"step": 1, "target_h": VP_RESOLUTIONS[self._vp_export_resolution_idx][1]}
 
         def _seq(ctx):
             s = state["step"]
 
             if s == 1:
-                # Restore to plain colours for RGB capture
-                self._restore_original_colors(silent=True)
-                self._enabled = False
-                scene = lf.get_scene()
-                if scene: scene.notify_changed()
+                lf.set_depth_view(False)
+                lf.ui.request_redraw()
                 state["step"] = 2
 
             elif s == 2:
@@ -1805,21 +1593,20 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                         img.save(fh, "PNG", compress_level=self._vp_export_compress)
                         fh.flush()
                         os.fsync(fh.fileno())
-                    self._vp_set_status("RGB saved — applying depthmap...", warning=True)
+                    self._vp_set_status("RGB saved — switching to depth view...", warning=True)
                 except Exception as e:
                     self._vp_set_status(f"RGB save error: {e}", error=True)
                     lf.remove_draw_handler("depthmap.dof_seq")
                     return
 
-                # Re-apply depthmap for greyscale capture
-                self._enabled = True
-                self._apply_depthmap(silent=True)
-                scene = lf.get_scene()
-                if scene: scene.notify_changed()
+                # Switch to native greyscale depth view for the second capture
+                lf.set_depth_view_mode("gray")
+                lf.set_depth_view(True)
+                lf.ui.request_redraw()
                 state["step"] = 3
 
             elif s == 3:
-                # Capture depthmap viewport → VIEWPORT_DGSC.png
+                # Capture native depth-view viewport → VIEWPORT_DGSC.png
                 target_h = state["target_h"]
                 saved_ok = False
                 try:
@@ -1838,15 +1625,13 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output
                     saved_ok = True
                 except Exception as e:
                     self._vp_set_status(f"Depth save error: {e}", error=True)
-                    lf.remove_draw_handler("depthmap.dof_seq")
-                    return
                 finally:
                     lf.remove_draw_handler("depthmap.dof_seq")
-                    # Restore original enabled state
-                    if not state["was_enabled"]:
-                        self._restore_original_colors(silent=True)
-                        self._enabled = False
-                    self._dirty("enabled", "disabled")
+                    # Restore native depth-view state exactly as it was
+                    lf.set_depth_view(was_depth_view)
+                    lf.set_depth_view_mode(was_depth_mode)
+                    lf.set_depth_view_range(*was_depth_range)
+                    lf.ui.request_redraw()
 
                 if not saved_ok:
                     return

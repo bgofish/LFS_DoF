@@ -30,66 +30,21 @@
     <!-- ── Header ──────────────────────────────────────────────────── -->
     <span class="section-label">Target: {{target_name}}</span>
 
+    <!-- ── Depth Map (native viewport depth view) ─────────────────────── -->
+    <span class="section-label" style="color:#4A90D9;">Depth Map</span>
     <div class="btn-row">
-      <div data-if="enabled">
-        <button class="btn btn-active" data-event-click="toggle_enable"
-                title="Disable the depth map.">Depth Map: ON</button>
-      </div>
-      <div data-if="disabled">
-        <button class="btn" data-event-click="toggle_enable"
-                title="Enable the depth map.">Depth Map: OFF</button>
-      </div>
-      <div data-if="live_preview">
-        <button class="btn btn-active" data-event-click="toggle_live"
-                title="Automatically update when settings change.">Live Preview: ON</button>
-      </div>
-      <div data-if="not_live_preview">
-        <button class="btn" data-event-click="toggle_live"
-                title="Automatically update when settings change.">Live Preview: OFF</button>
-      </div>
+      <button class="btn" data-event-click="set_depth_mode_gray"
+              data-class-btn-active="depth_mode_gray_active"
+              title="Show greyscale depth in the viewport.">Gray</button>
+      <button class="btn" data-event-click="set_depth_mode_color"
+              data-class-btn-active="depth_mode_color_active"
+              title="Show palette-colour depth in the viewport.">Color</button>
+      <button class="btn" data-event-click="set_depth_mode_off"
+              data-class-btn-active="depth_mode_off_active"
+              title="Disable depth view — show normal splat colours.">Off</button>
     </div>
-
-    <div class="separator"></div>
-
-    <!-- ── Colormap ─────────────────────────────────────────────────── -->
-    <span class="section-label" style="color:#4A90D9;">Colormap</span>
-    <div class="btn-row">
-      <button class="btn" data-event-click="set_cmap_0" data-class-btn-active="cmap_0_active" title="Grayscale colormap.">Gray</button>
-      <button class="btn" data-event-click="set_cmap_1" data-class-btn-active="cmap_1_active" title="Jet rainbow colormap.">Jet</button>
-      <button class="btn" data-event-click="set_cmap_2" data-class-btn-active="cmap_2_active" title="Turbo colormap.">Turbo</button>
-      <button class="btn" data-event-click="set_cmap_3" data-class-btn-active="cmap_3_active" title="Viridis colormap.">Viridis</button>
-    </div>
-    <div class="btn-row">
-      <button class="btn" data-event-click="toggle_invert"
-              data-class-btn-active="invert"
-              title="Invert the colormap.">Invert</button>
-    </div>
-    <span class="text-dim">Active: {{colormap_label}}</span>
-
-    <div class="separator"></div>
-
-    <!-- ── Presets ───────────────────────────────────────────────────── -->
-    <span class="section-label" style="color:#4A90D9;">Presets</span>
-    <div class="btn-row">
-      <button class="btn" data-event-click="preset_jet_z"   title="Jet colormap, Z axis.">Jet Z</button>
-      <button class="btn" data-event-click="preset_gray_z"  title="Grayscale, Z axis.">Gray Z</button>
-      <button class="btn" data-event-click="preset_turbo_z" title="Turbo colormap, Z axis.">Turbo Z</button>
-      <button class="btn" data-event-click="preset_cam_p"   title="Greyscale, camera projective axis.">Cam P</button>
-      <button class="btn" data-event-click="preset_cam_o"   title="Greyscale, camera radial (spherical) axis.">Cam O</button>
-    </div>
-
-    <div class="separator"></div>
-
-    <!-- ── Depth Axis ────────────────────────────────────────────────── -->
-    <span class="section-label" style="color:#4A90D9;">Depth Axis</span>
-    <div class="btn-row">
-      <button class="btn" data-event-click="set_axis_0" data-class-btn-active="axis_0_active" title="Z-axis world depth.">Z</button>
-      <button class="btn" data-event-click="set_axis_1" data-class-btn-active="axis_1_active" title="Y-axis height.">Y</button>
-      <button class="btn" data-event-click="set_axis_2" data-class-btn-active="axis_2_active" title="X-axis side.">X</button>
-      <button class="btn" data-event-click="set_axis_3" data-class-btn-active="axis_3_active" title="Camera projective (flat bands).">Cam P</button>
-      <button class="btn" data-event-click="set_axis_4" data-class-btn-active="axis_4_active" title="Camera radial (spherical) — Greyscale.">Cam O</button>
-    </div>
-    <span class="text-dim">Active: {{axis_label}}</span>
+    <span class="text-dim">Active: {{depth_mode_label}}</span>
+    <span class="text-dim">Use the Near/Far fields on the viewport overlay to fine-tune range, or Pick Point below.</span>
 
     <div class="separator"></div>
 
@@ -156,29 +111,6 @@
           <span class="text-warn">Min &gt; Max!</span>
           <button class="btn" data-event-click="swap_range" title="Swap Min and Max.">Swap</button>
         </div>
-      </div>
-      <div class="btn-row">
-        <button class="btn" data-event-click="toggle_range_only"
-                data-class-btn-active="range_only"
-                title="Only color splats within the depth range.">Only Color Within Range</button>
-      </div>
-    </div>
-
-    <div class="separator"></div>
-
-    <!-- ── Apply / Restore ──────────────────────────────────────────── -->
-    <div data-if="disabled">
-      <div class="btn-row">
-        <button class="btn" data-event-click="apply_depthmap"
-                title="Apply the depth map to the splat.">Apply Depth Map</button>
-      </div>
-    </div>
-    <div data-if="enabled">
-      <div class="btn-row">
-        <button class="btn" data-event-click="update_depthmap"
-                title="Re-apply with current settings.">Update Depth Map</button>
-        <button class="btn" data-event-click="restore_original"
-                title="Restore the original splat colors.">Restore Original</button>
       </div>
     </div>
 
@@ -348,23 +280,26 @@
         <input type="text" class="number-input" data-value="vp_compress_str" style="width:2.5em;" />
       </div>
 
-      <div class="btn-row">
-        <button class="btn" data-event-click="toggle_vp_transp"
-                data-class-btn-active="vp_transparency"
-                title="Export as RGBA PNG using black/white background BW2A method.">Transparency (RGBA)</button>
-      </div>
+      <!-- <div class="btn-row"> -->
+        <!-- <button class="btn" data-event-click="toggle_vp_transp" -->
+                <!-- data-if="vp_no_transparency" -->
+                <!-- title="Export as RGBA PNG using black/white background BW2A method.">Transparency (RGBA): Off</button> -->
+        <!-- <button class="btn btn-active" data-event-click="toggle_vp_transp" -->
+                <!-- data-if="vp_transparency" -->
+                <!-- title="Disable RGBA transparency export.">Transparency (RGBA): ON</button> -->
+      <!-- </div> -->
 
       <div class="btn-row">
         <button class="btn" data-event-click="do_vp_export"
-                title="Capture colour + depth viewports and save PNGs.">Export</button>
+                title="Capture colour + depth viewports and save PNGs.">Export Still Images</button>
       </div>
       <div class="btn-row">
         <button class="btn" data-event-click="open_dof_still"
-                title="Open DoF still compositor with last exported PNGs (no re-export).">Open DoF Still</button>
+                title="Open DoF still compositor with last exported PNGs (no re-export).">Open Internal DoF Still Editor</button>
       </div>
       <div class="btn-row">
         <button class="btn" data-event-click="run_still_bat"
-                title="Run STILL_DoF.bat external editor.">Run External Still Editor</button>
+                title="Run STILL_DoF.bat external editor.">Open External DoF Still Editor</button>
       </div>
 
       <div data-if="vp_status_ok"><span class="text-ok">{{vp_status}}</span></div>
