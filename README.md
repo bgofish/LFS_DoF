@@ -13,6 +13,7 @@ IMPORTANT - KNOWN ISSUES:
 
 1) Alpha transparency is not working at all  hiding the button for now
 2) Image size must be a multiple of 4 (?) - otherwise they wont show in the compositor
+3) Still images of the screen resolution are horizontally mirrored (LFS problem)
 
 
 ## Installation (LichtFeld Studio v0.5.2+  This requires the LFS verison to have the Depth display)
